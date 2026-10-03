@@ -40,7 +40,72 @@ replay:
   min_speed: 1
   max_speed: 60
   speed_steps: [1, 5, 10, 30, 60]
-  queue_size: 1
+  queue_size: 8
+
+# Research/demo thresholds, NOT official ATC separation standards.
+risk:
+  active_profile: research_default
+  min_alert_level: MEDIUM
+  allow_low_watch: false
+  lookahead_s: 60
+  max_data_age_for_alert_s: 75
+  treat_unknown_vertical_as: conservative # conservative | skip | downgrade_one_level
+  filters:
+    ignore_both_on_ground: true
+    ignore_diverging: true
+    ignore_beyond_lookahead: true
+    ignore_old_data: true
+  confirmation:
+    confirm_cycles: 2
+    confirm_min_seconds: 30
+  clear:
+    clear_below_level: MEDIUM
+    clear_cycles: 2
+    clear_min_seconds: 30
+  cooldown_s: 300
+  data_lost_timeout_s: 90
+  confidence:
+    high_max_age_s: 15
+    high_max_uncertainty_m: 250
+    medium_max_age_s: 45
+    medium_max_uncertainty_m: 750
+  profiles:
+    research_default:
+      levels:
+        LOW: {max_horizontal_separation_m: 3000, max_vertical_separation_m: 900, max_time_to_cpa_s: 120}
+        MEDIUM: {max_horizontal_separation_m: 1852, max_vertical_separation_m: 600, max_time_to_cpa_s: 90}
+        HIGH: {max_horizontal_separation_m: 926, max_vertical_separation_m: 300, max_time_to_cpa_s: 60}
+        CRITICAL: {max_horizontal_separation_m: 463, max_vertical_separation_m: 150, max_time_to_cpa_s: 30}
+      uncertainty_factor: 1.0
+      adjustments:
+        closing_speed_escalation_mps: 100
+        closing_speed_raise_levels: 1
+        poor_data_age_s: 60
+        downgrade_poor_data: true
+        poor_data_quality_flags: [LOW_QUALITY, stale_position, position_timestamp_missing]
+      in_trail:
+        enabled: true
+        max_track_difference_deg: 20
+        min_lateral_offset_m: 1500
+        downgrade_levels: 1
+    sensitive_test:
+      levels:
+        LOW: {max_horizontal_separation_m: 22000, max_vertical_separation_m: 12000, max_time_to_cpa_s: 120}
+        MEDIUM: {max_horizontal_separation_m: 18000, max_vertical_separation_m: 10000, max_time_to_cpa_s: 120}
+        HIGH: {max_horizontal_separation_m: 14000, max_vertical_separation_m: 8000, max_time_to_cpa_s: 90}
+        CRITICAL: {max_horizontal_separation_m: 10000, max_vertical_separation_m: 6000, max_time_to_cpa_s: 60}
+      uncertainty_factor: 0.0
+      adjustments:
+        closing_speed_escalation_mps: 80
+        closing_speed_raise_levels: 1
+        poor_data_age_s: 70
+        downgrade_poor_data: false
+        poor_data_quality_flags: [LOW_QUALITY, stale_position, position_timestamp_missing]
+      in_trail:
+        enabled: false
+        max_track_difference_deg: 30
+        min_lateral_offset_m: 1000
+        downgrade_levels: 1
 
 prediction:
   model: constant_velocity
@@ -83,6 +148,7 @@ web:
   reconnect_initial_ms: 1000
   reconnect_max_ms: 15000
   labels_min_zoom: 11
+  label_exclusion_nm: 2
   prediction_ticks_min_zoom: 11
   trail_oldest_opacity: 0.18
   trail_newest_opacity: 0.82

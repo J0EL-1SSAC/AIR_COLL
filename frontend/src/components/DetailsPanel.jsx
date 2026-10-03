@@ -4,7 +4,13 @@ import {DISTANCE_FORMAT} from '../config';
 const number = (value, digits=0) => value == null || !Number.isFinite(Number(value)) ? '—' : Number(value).toLocaleString(undefined,{maximumFractionDigits:digits,minimumFractionDigits:digits});
 const row = (label,value) => <React.Fragment key={label}><dt>{label}</dt><dd>{value}</dd></React.Fragment>;
 
-export default function DetailsPanel({aircraft, prediction}) {
+export default function DetailsPanel({aircraft, prediction, event}) {
+  if (event) return <aside className="side-panel right event-details" aria-label="Alert event details">
+    <h2 className="panel-heading">Event details</h2>
+    <strong className="alert-title">POTENTIAL AIRCRAFT CONFLICT</strong>
+    <div className="event-json-label">Full stored event record · {event.mode} · {event.risk_profile}</div>
+    <pre className="event-json">{JSON.stringify(event,null,2)}</pre>
+  </aside>;
   if (!aircraft) return <aside className="side-panel right"><h2 className="panel-heading">Aircraft details</h2><div className="empty-state">Select an aircraft on the map.</div></aside>;
   const altitude = aircraft.geo_altitude_m ?? aircraft.baro_altitude_m;
   const altitudeBasis = aircraft.geo_altitude_m != null ? 'Geometric' : aircraft.baro_altitude_m != null ? 'Barometric' : 'Unavailable';

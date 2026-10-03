@@ -17,6 +17,12 @@
   --color-cpa-amber: #ffbe55;
   --color-cpa-red: #ff6670;
   --color-cpa-label: #fff0bf;
+  --color-prediction-light: #075fa5;
+  --color-risk-low: #69c9ef;
+  --color-risk-medium: #f1cb55;
+  --color-risk-high: #ff985d;
+  --color-risk-critical: #ff6d7e;
+  --color-test-profile: #f1cb55;
   --color-topbar: #0a121e;
   --color-topbar-overlay: #0a121eef;
   --color-live-border: #30775b;

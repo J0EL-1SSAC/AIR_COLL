@@ -43,13 +43,14 @@ class LiveCollector:
                  low_altitude_ft: float, manager_config: dict, recorder: SQLiteRecorder,
                  daily_credit_quota: float, estimated_credits_per_request: float,
                  clock: Clock | None = None, mode: str = "LIVE", record_live: bool = True,
-                 on_publish=None, prediction_config: dict | None = None):
+                 on_publish=None, prediction_config: dict | None = None, alert_processor=None):
         self.source, self.center, self.radius_nm = source, center, radius_nm
         self.poll_interval_s, self.max_backoff_s = poll_interval_s, max_backoff_s
         log_daily_quota_warning(poll_interval_s, daily_credit_quota, estimated_credits_per_request)
         self.sparse_count_threshold, self.low_altitude_m = sparse_count_threshold, low_altitude_ft / _M_TO_FT
         self.clock, self.mode, self.record_live = clock or LiveClock(), mode, record_live
         self.on_publish = on_publish
+        self.alert_processor = alert_processor
         self.latest: list[dict[str, Any]] = []
         self.status = "NO_DATA"
         self.message = "Waiting for the first live OpenSky response."
@@ -104,6 +105,14 @@ class LiveCollector:
                          "low_or_ground_count": self.low_or_ground_count,
                          "recently_lost": [item["state"] for item in self.manager.recently_lost.values()]}}
 
+    async def _process_alerts(self) -> None:
+        if self.alert_processor is None:
+            return
+        try:
+            await self.alert_processor(self)
+        except Exception:
+            logger.exception("Alert pipeline failed in %s mode; collector continues without fabricating alerts.", self.mode)
+
     async def poll_once(self) -> bool:
         self.updated_at = self.clock.isoformat()
         try:
@@ -119,6 +128,7 @@ class LiveCollector:
             self.low_or_ground_count = counts["low_or_ground_count"]
             self.status, self.message = "DEGRADED", f"{self.mode} source unavailable: {exc}"
             self._publish("status")
+            await self._process_alerts()
             return False
         now = self.clock.now()
         self.retry_after_s = None
@@ -138,6 +148,7 @@ class LiveCollector:
         else:
             self.status, self.message, kind = "OK", f"{self.mode.title()} data received.", "snapshot"
         self._publish(kind)
+        await self._process_alerts()
         return True
 
     async def run_forever(self) -> None:

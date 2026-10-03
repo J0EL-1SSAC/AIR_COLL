@@ -1,23 +1,27 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 import yaml
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from pyproj import Geod
 
 from ..clock import LiveClock, ReplayClock
+from ..alerts import AlertManager
 from ..collector import LiveCollector
+from ..event_store import SQLiteEventStore
 from ..models import AirportCenter
 from ..opensky import OpenSkySource
 from ..pairs import compute_pair_cpas
 from ..replay import ReplaySource
+from ..risk import validate_timing_settings
 from ..storage import SQLiteRecorder
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -27,6 +31,7 @@ with CONFIG_PATH.open(encoding="utf-8") as stream:
 AIRPORT = CONFIG["airport"]
 CENTER = AirportCenter(AIRPORT["icao"], float(AIRPORT["latitude"]), float(AIRPORT["longitude"]))
 _M_TO_FT = 3.280839895
+logger = logging.getLogger(__name__)
 
 
 class ReplayRequest(BaseModel):
@@ -41,14 +46,39 @@ def make_collector(recorder, *, clock=None, mode="LIVE", source=None, on_publish
                                api_url=CONFIG["opensky"]["api_url"],
                                timeout_s=float(CONFIG["opensky"]["request_timeout_s"]))
     c = CONFIG["collector"]
-    return LiveCollector(source=source, center=CENTER, radius_nm=float(AIRPORT["radius_nm"]),
+    risk_settings = CONFIG["risk"]
+    profile = os.environ.get("AIR_COL_RISK_PROFILE", risk_settings["active_profile"])
+    if profile not in risk_settings["profiles"]:
+        raise ValueError(f"Unknown AIR_COL_RISK_PROFILE: {profile}")
+    restored = app.state.event_store.recent(mode=mode, risk_profile=profile)
+    alert_manager = AlertManager(settings=risk_settings, airport=CENTER.icao, mode=mode,
+                                 risk_profile=profile, restored_events=restored)
+    collector = LiveCollector(source=source, center=CENTER, radius_nm=float(AIRPORT["radius_nm"]),
                          poll_interval_s=float(c["poll_interval_s"]), max_backoff_s=float(c["max_backoff_s"]),
                          sparse_count_threshold=int(c["sparse_count_threshold"]),
                          low_altitude_ft=float(c["low_altitude_ft"]), manager_config=CONFIG["state_manager"],
                          recorder=recorder, daily_credit_quota=float(CONFIG["opensky"]["daily_credit_quota"]),
                          estimated_credits_per_request=float(CONFIG["opensky"]["estimated_credits_per_states_request"]),
                          clock=clock, mode=mode, record_live=(mode == "LIVE"), on_publish=on_publish,
-                         prediction_config=CONFIG["prediction"])
+                         prediction_config=CONFIG["prediction"], alert_processor=process_alert_cycle)
+    collector.alert_manager = alert_manager
+    return collector
+
+
+async def process_alert_cycle(collector: LiveCollector) -> None:
+    now = collector.clock.now()
+    states = collector.manager.snapshot(now, include_unpositioned=True)
+    result = compute_pair_cpas(
+        states, airport_radius_nm=float(AIRPORT["radius_nm"]), cpa_settings=CONFIG["cpa"],
+        prediction_settings=CONFIG["prediction"], inverse_transformer=collector.predictor.inverse_transformer)
+    changed = collector.alert_manager.process_cycle(result["pairs"], states, now)
+    await app.state.event_store.upsert_many([item.get("event", item) for item in changed])
+    for item in changed:
+        sub_event = item.get("sub_event")
+        if sub_event in {"opened", "updated", "escalated", "resolved"}:
+            push_active(collector, {"type": "alert", "mode": collector.mode,
+                                    "ts": collector.clock.isoformat(), "source_status": collector.status,
+                                    "data": {"sub_event": sub_event, "event": item["event"]}})
 
 
 def push_active(collector, message):
@@ -101,6 +131,13 @@ async def run_replay(source: ReplaySource, collector: LiveCollector, clock: Repl
             await collector.poll_once()
     finally:
         if getattr(app.state, "active_collector", None) is collector:
+            reason = "replay_ended" if source.finished else "replay_stopped"
+            changes = collector.alert_manager.finalize(clock.now(), reason)
+            await app.state.event_store.upsert_many([item["event"] for item in changes])
+            for item in changes:
+                push_active(collector, {"type": "alert", "mode": collector.mode,
+                                        "ts": clock.isoformat(), "source_status": collector.status,
+                                        "data": {"sub_event": "resolved", "event": item["event"]}})
             app.state.replay_task = None
             app.state.replay_source = None
             app.state.replay_collector = None
@@ -116,6 +153,11 @@ async def lifespan(app: FastAPI):
     app.state.database_path = db_path
     app.state.ws_queues = set()
     app.state.replay_task = app.state.replay_source = app.state.replay_collector = None
+    app.state.event_store = SQLiteEventStore(db_path)
+    await asyncio.to_thread(app.state.event_store.initialize)
+    for warning in validate_timing_settings(CONFIG):
+        logger.warning("Alert timing configuration: %s", warning)
+    logger.info("Potential Conflict risk profile: %s", os.environ.get("AIR_COL_RISK_PROFILE", CONFIG["risk"]["active_profile"]))
     recorder = SQLiteRecorder(db_path, batch_size=int(storage["batch_size"]),
                               flush_interval_s=float(storage["flush_interval_s"]),
                               low_altitude_m=float(CONFIG["collector"]["low_altitude_ft"]) / _M_TO_FT,
@@ -147,7 +189,54 @@ app.add_middleware(CORSMiddleware, allow_origins=CONFIG.get("api", {}).get("cors
 async def health():
     collector = app.state.active_collector
     return {"mode": collector.mode, "status": collector.status,
-            "updated_at": collector.updated_at, "message": collector.message}
+            "updated_at": collector.updated_at, "message": collector.message,
+            "risk_profile": collector.alert_manager.risk_profile}
+
+
+@app.get("/api/risk/config")
+async def risk_config():
+    settings = CONFIG["risk"]
+    profile = app.state.active_collector.alert_manager.risk_profile
+    return {"active_profile": profile, "min_alert_level": settings["min_alert_level"],
+            "allow_low_watch": settings["allow_low_watch"], "lookahead_s": settings["lookahead_s"],
+            "max_data_age_for_alert_s": settings["max_data_age_for_alert_s"],
+            "confirmation": settings["confirmation"], "clear": settings["clear"],
+            "cooldown_s": settings["cooldown_s"], "data_lost_timeout_s": settings["data_lost_timeout_s"],
+            "treat_unknown_vertical_as": settings["treat_unknown_vertical_as"],
+            "filters": settings["filters"], "profile": settings["profiles"][profile]}
+
+
+@app.get("/api/alerts/active")
+async def active_alerts(mode: str | None = None):
+    selected_mode = mode or app.state.active_collector.mode
+    if selected_mode not in {"LIVE", "REPLAY"}:
+        raise HTTPException(422, "mode must be LIVE or REPLAY")
+    alerts = await asyncio.to_thread(app.state.event_store.active, mode=selected_mode)
+    return {"mode": selected_mode, "alerts": alerts}
+
+
+@app.get("/api/events")
+async def events(status: str | None = None, risk: str | None = None, mode: str = "LIVE",
+                 aircraft: str | None = None, start: float | None = None, end: float | None = None,
+                 limit: int = Query(default=100, ge=1, le=1000), offset: int = Query(default=0, ge=0)):
+    if mode not in {"LIVE", "REPLAY"}:
+        raise HTTPException(422, "mode must be LIVE or REPLAY")
+    if start is not None and end is not None and start > end:
+        raise HTTPException(422, "start must be earlier than end")
+    if risk and risk.upper() not in {"LOW", "MEDIUM", "HIGH", "CRITICAL", "NORMAL"}:
+        raise HTTPException(422, "risk must be LOW, MEDIUM, HIGH, CRITICAL, or NORMAL")
+    result = await asyncio.to_thread(app.state.event_store.query, status=status, risk=risk, mode=mode,
+                                     aircraft=aircraft, start_ts=start, end_ts=end,
+                                     limit=limit, offset=offset)
+    return {"mode": mode, "events": result, "limit": limit, "offset": offset}
+
+
+@app.get("/api/events/{event_id}")
+async def event_detail(event_id: str):
+    event = await asyncio.to_thread(app.state.event_store.get, event_id)
+    if event is None:
+        raise HTTPException(404, "Event not found.")
+    return event
 
 
 @app.get("/api/airport")
@@ -168,6 +257,7 @@ async def airport():
             "low_altitude_ft": float(CONFIG["collector"]["low_altitude_ft"]),
             "labels_min_zoom": int(CONFIG["web"].get("labels_min_zoom", 11)),
             "prediction_ticks_min_zoom": int(CONFIG["web"].get("prediction_ticks_min_zoom", 11)),
+            "label_exclusion_nm": float(CONFIG["web"].get("label_exclusion_nm", 2)),
             "trail_oldest_opacity": float(CONFIG["web"].get("trail_oldest_opacity", 0.18)),
             "trail_newest_opacity": float(CONFIG["web"].get("trail_newest_opacity", 0.82)),
             "replay": CONFIG["replay"], "cpa_display": {

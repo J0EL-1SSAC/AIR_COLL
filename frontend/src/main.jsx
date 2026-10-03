@@ -19,6 +19,14 @@ function App(){
   const [aircraft,setAircraft]=useState([]);
   const [predictions,setPredictions]=useState({});
   const [pairs,setPairs]=useState([]);
+  const [activeAlerts,setActiveAlerts]=useState([]);
+  const [eventHistory,setEventHistory]=useState([]);
+  const [riskConfig,setRiskConfig]=useState(null);
+  const [selectedEvent,setSelectedEvent]=useState(null);
+  const [alertRefresh,setAlertRefresh]=useState(0);
+  const [alertsLoading,setAlertsLoading]=useState(false);
+  const [alertFilters,setAlertFilters]=useState({risk:'',status:'RESOLVED',mode:'LIVE',start:'',end:''});
+  const [focusedEventId,setFocusedEventId]=useState(null);
   const [pairThresholds,setPairThresholds]=useState({near_nm:1.5,amber_nm:3});
   const [status,setStatus]=useState('CONNECTING');
   const [message,setMessage]=useState('Connecting to the live collector.');
@@ -50,6 +58,11 @@ function App(){
   },[]);
 
   useEffect(()=>{
+    fetch(`${apiBase}/api/risk/config`).then(response=>response.ok?response.json():Promise.reject(new Error('Risk settings unavailable.')))
+      .then(setRiskConfig).catch(()=>setRiskConfig(null));
+  },[mode]);
+
+  useEffect(()=>{
     const timer=window.setInterval(()=>{const now=new Date();setUtcNow(now.toISOString().slice(11,19));setAgeNow(Date.now());},UI.updateAgeTickMs);
     return()=>window.clearInterval(timer);
   },[]);
@@ -64,10 +77,15 @@ function App(){
       socket.onmessage=event=>{
         try{
           const payload=JSON.parse(event.data);
+          if(payload.type==='alert'){
+            setAlertRefresh(value=>value+1);
+            return;
+          }
           setMode(payload.mode||'LIVE');setStatus(payload.source_status||'NO_DATA');
           setMessage(payload.data?.message||'No source status message.');
           setAircraft(payload.data?.aircraft||[]);setCounts(payload.data||{});
           setLastReceivedAt(Date.now());
+          setAlertRefresh(value=>value+1);
           setSelectedId(current=>current&&(payload.data?.aircraft||[]).some(a=>a.icao24===current)?current:null);
         }catch{setMessage('Received an unreadable data update.');}
       };
@@ -81,6 +99,26 @@ function App(){
     connect();
     return()=>{stopped=true;window.clearTimeout(retryTimer);socket?.close();};
   },[airport]);
+
+  useEffect(()=>{
+    if(!airport)return undefined;
+    let stopped=false;
+    setAlertsLoading(true);
+    const params=new URLSearchParams({mode:alertFilters.mode,limit:'100'});
+    if(alertFilters.risk)params.set('risk',alertFilters.risk);
+    if(alertFilters.status)params.set('status',alertFilters.status);
+    if(alertFilters.start)params.set('start',String(new Date(alertFilters.start).getTime()/1000));
+    if(alertFilters.end)params.set('end',String(new Date(alertFilters.end).getTime()/1000));
+    Promise.all([
+      fetch(`${apiBase}/api/alerts/active?mode=${mode}`).then(r=>r.ok?r.json():Promise.reject(new Error('Active alerts unavailable.'))),
+      fetch(`${apiBase}/api/events?${params}`).then(r=>r.ok?r.json():Promise.reject(new Error('Event history unavailable.'))),
+    ]).then(([active,history])=>{
+      if(stopped)return;
+      setActiveAlerts(active.alerts||[]);setEventHistory(history.events||[]);
+    }).catch(()=>{if(!stopped){setActiveAlerts([]);setEventHistory([]);}})
+      .finally(()=>{if(!stopped)setAlertsLoading(false);});
+    return()=>{stopped=true;};
+  },[airport,mode,alertRefresh,alertFilters.risk,alertFilters.status,alertFilters.mode,alertFilters.start,alertFilters.end]);
 
   useEffect(()=>{
     if(!airport)return undefined;
@@ -128,7 +166,17 @@ function App(){
     catch(error){setReplayMessage(error.message);}
     finally{setReplayBusy(false);}
   }
-  function focusPair(pair){setFocusedPair(pair);setSelectedId(pair.aircraft_a.icao24);}
+  function focusPair(pair){setSelectedEvent(null);setFocusedEventId(null);setFocusedPair(pair);setSelectedId(pair.aircraft_a.icao24);}
+  function focusAlert(event,inspect=false){
+    setSelectedId(event.aircraft_1.icao24);setFocusedEventId(event.event_id);
+    setSelectedEvent(inspect?event:null);
+    setFocusedPair({pair_key:event.pair_key,cpa_position:{aircraft_a:{latitude:event.cpa_aircraft_a_lat,longitude:event.cpa_aircraft_a_lon},
+      aircraft_b:{latitude:event.cpa_aircraft_b_lat,longitude:event.cpa_aircraft_b_lon}}});
+  }
+  function updateAlertFilter(key,value){
+    if(key==='reload'){setAlertRefresh(current=>current+1);return;}
+    setAlertFilters(current=>({...current,[key]:value}));
+  }
 
   if(!airport)return <main className="loading-screen"><h1>AIR_COL</h1><div className="skeleton"/><div className="skeleton"/><p>{message}</p>
     <p className="disclaimer">Research prototype. Not ATC, TCAS/ACAS or a certified safety system. Public ADS-B may be delayed, incomplete or inaccurate, especially at low altitude and on the ground.</p></main>;
@@ -137,17 +185,22 @@ function App(){
   const replay={speed:replaySpeed??airport.replay.default_speed,onSpeed:setReplaySpeed,onStart:startReplay,onStop:stopReplay,busy:replayBusy,mode,message:replayMessage};
   return <main className="app-shell">
     <DashboardHeader airport={airport} mode={mode} status={status} message={message} utcNow={utcNow}
+      alertCounts={activeAlerts.reduce((counts,item)=>({...counts,[item.current_risk]:(counts[item.current_risk]||0)+1}),{})}
+      riskProfile={riskConfig?.active_profile}
       lastUpdateAge={lastUpdateAge} onToggleLeft={()=>setLeftCollapsed(value=>!value)} onToggleRight={()=>setRightCollapsed(value=>!value)}/>
     <div className={workspaceClass}>
       {!leftCollapsed&&<FiltersPanel airport={airport} counts={counts} predictionCounts={predictionCounts} mapLayers={mapLayers}
         onLayerChange={updateLayer} labelMode={labelMode} onLabelMode={setLabelMode} basemap={basemap} onBasemap={changeBasemap}
         groundOnly={groundOnly} onGroundOnly={setGroundOnly}/>}
       <MapView airport={airport} aircraft={visibleAircraft} predictions={predictions} pairs={pairs}
+        activeAlerts={activeAlerts} focusedEventId={focusedEventId}
         selectedId={selectedId} onSelect={state=>setSelectedId(state.icao24)} focusPair={focusedPair}
         onFocusPair={focusPair} layers={mapLayers} labelMode={labelMode} basemap={basemap} onTileFailure={tileFailure} mapNotice={mapNotice}/>
-      {!rightCollapsed&&<DetailsPanel aircraft={selectedAircraft} prediction={selectedAircraft?predictions[selectedAircraft.icao24]:null}/>}
+      {!rightCollapsed&&<DetailsPanel aircraft={selectedAircraft} prediction={selectedAircraft?predictions[selectedAircraft.icao24]:null} event={selectedEvent}/>}
     </div>
-    <BottomPanel pairs={pairs} thresholds={pairThresholds} replaySettings={airport.replay} replay={replay} onFocusPair={focusPair}/>
+    <BottomPanel pairs={pairs} thresholds={pairThresholds} replaySettings={airport.replay} replay={replay} onFocusPair={focusPair}
+      alerts={activeAlerts} history={eventHistory} riskProfile={riskConfig?.active_profile} mode={mode} alertFilters={alertFilters}
+      onAlertFilterChange={updateAlertFilter} onFocusAlert={event=>focusAlert(event,false)} onInspectEvent={event=>focusAlert(event,true)} alertsLoading={alertsLoading}/>
     <footer className="disclaimer">Research prototype. Not ATC, TCAS/ACAS or a certified safety system. Public ADS-B data can be delayed, incomplete or inaccurate, especially at low altitude and on the ground.{pairsError&&<span> · Pair data unavailable.</span>}{predictionError&&<span> · Prediction data unavailable.</span>}</footer>
   </main>;
 }
