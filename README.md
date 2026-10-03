@@ -1,24 +1,25 @@
 # AIR_COL
 
-AIR_COL is a research and educational prototype for observing live ADS-B aircraft around one configurable airport. The default airport is Chennai International (VOMM). The current implementation includes live OpenSky collection, an interactive Leaflet dashboard, aircraft state/history management, SQLite recording, and coverage summaries.
+AIR_COL is a research and education prototype for observing public ADS-B aircraft around one configurable airport. The default airport is Chennai International (VOMM). It currently includes live OpenSky collection, a React + Leaflet dashboard, recording and replay, trajectory prediction, aircraft-pair closest-approach estimates, configurable risk profiles, and a persistent alert lifecycle.
 
-> **Research use only.** AIR_COL is not ATC, TCAS/ACAS, or a certified runway-safety system. Public ADS-B data can be delayed, omit aircraft, and have poor low-altitude and ground coverage. Do not use it for operational or safety decisions.
+> **Research use only.** AIR_COL is not ATC, TCAS/ACAS, a certified safety system, or an official separation determination. Public ADS-B data can be delayed, incomplete, or inaccurate, especially at low altitude and on the ground. Do not use it for operational or safety decisions.
 
-The running application uses real OpenSky data only. It never substitutes demo aircraft. When credentials or the live source are unavailable, the app reports `DEGRADED` or `NO_DATA`.
+The running application uses real OpenSky data only. It never substitutes demo aircraft. When credentials or the live source are unavailable, it reports a degraded/no-data status. Replay and offline evaluation read observations previously recorded from the live feed.
 
-## Current scope
+## Current features
 
-Implemented through Phase 3:
+- Configurable airport, monitoring radius, polling/backoff, data-quality and staleness rules.
+- OpenSky OAuth2 client-credentials adapter behind a `DataSource` interface.
+- FastAPI REST API and WebSocket stream for LIVE and REPLAY pipeline modes.
+- React + Vite + Leaflet dashboard with aircraft, trails, predictions, closest approaches, alert highlights, and event history.
+- Age-compensated aircraft state management in a local ENU frame.
+- SQLite recording for raw observations, coverage samples, and persistent alert events.
+- Replay of recorded observations through the same state, pair, risk, and alert pipeline.
+- CPA calculations and configurable LOW/MEDIUM/HIGH/CRITICAL risk profiles.
+- Alert confirmation, hysteresis, escalation, cooldown continuation, and `data_lost` resolution.
+- Headless evaluation of recorded ranges, with CSV and Markdown reports.
 
-- OpenSky OAuth2 client-credentials adapter, with a `DataSource` interface for later live sources.
-- Configurable airport, radius, polling, backoff, credit estimate, history and quality thresholds.
-- FastAPI REST endpoints and a WebSocket stream.
-- React + Vite + Leaflet map with live positions and trails.
-- In-memory aircraft state/history manager with ENU coordinates, age compensation, quality flags, and bounded history.
-- SQLite WAL recording of raw source states and coverage samples.
-- Bucketed coverage summaries.
-
-Replay, trajectory prediction, potential conflict detection, and runway modeling are not implemented yet.
+Runway geometry, runway occupancy, and runway conflict detection are not implemented yet.
 
 ## Requirements
 
@@ -26,18 +27,18 @@ Replay, trajectory prediction, potential conflict detection, and runway modeling
 - Node.js 18 or newer and npm
 - OpenSky Network OAuth2 client credentials for live data
 
-The project has been exercised with Python 3.14 and Node.js 26. See `config.yaml` for the active settings.
+All operational thresholds and airport settings are in `config.yaml`. Secrets belong in environment variables, never in the repository.
 
 ## OpenSky credentials
 
-Create an API client in your OpenSky Network account and obtain its OAuth2 client ID and client secret. Set both as environment variables in the same shell that starts the backend. Do not commit credentials or put them in frontend variables.
+Create API client credentials in your OpenSky Network account. Set the client ID and secret in the shell that starts the backend:
 
 ```bash
-export OPENSKY_CLIENT_ID='your_client_id'
-export OPENSKY_CLIENT_SECRET='your_client_secret'
+export OPENSKY_CLIENT_ID='your-client-id'
+export OPENSKY_CLIENT_SECRET='your-client-secret'
 ```
 
-The configured token endpoint uses the `opensky-network` realm. OpenSky quota and credit behavior can depend on account and request details. The startup estimate uses `opensky.daily_credit_quota` and `opensky.estimated_credits_per_states_request`; verify actual usage in your account.
+The configured token endpoint uses the `opensky-network` realm. OpenSky quota and credit behavior depends on account and request details. The application logs an estimate based on configured polling and credit settings; check your OpenSky account for actual usage.
 
 ## Install
 
@@ -47,10 +48,7 @@ From the repository root on macOS or Linux:
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -r requirements.txt
-
-cd frontend
-npm install
-cd ..
+npm --prefix frontend install
 ```
 
 ## Run the dashboard
@@ -59,19 +57,29 @@ Start the API in one terminal from the repository root:
 
 ```bash
 source .venv/bin/activate
-export OPENSKY_CLIENT_ID='your_client_id'
-export OPENSKY_CLIENT_SECRET='your_client_secret'
+export OPENSKY_CLIENT_ID='your-client-id'
+export OPENSKY_CLIENT_SECRET='your-client-secret'
 .venv/bin/uvicorn backend.airwatch.api.app:app --reload --reload-dir backend
 ```
 
 Start the frontend in a second terminal:
 
 ```bash
-cd frontend
-npm run dev
+npm --prefix frontend run dev
 ```
 
-Open the local URL printed by Vite, usually `http://localhost:5173`. If the API is not running or cannot reach OpenSky, the interface shows a disconnected or degraded/no-data status and does not display invented aircraft.
+Open the local URL printed by Vite, usually `http://localhost:5173`. Missing credentials, API errors, and empty responses are shown as degraded/no-data; no synthetic aircraft are generated.
+
+### Risk profiles
+
+The default profile is `research_default`. To select the deliberately loose profile for exercising the alert lifecycle with real live or recorded observations, export this before starting the API:
+
+```bash
+export AIR_COL_RISK_PROFILE=sensitive_test
+.venv/bin/uvicorn backend.airwatch.api.app:app --reload --reload-dir backend
+```
+
+The dashboard identifies the active profile and warns that `sensitive_test` alerts are not research results. The thresholds in every profile are research/demo values, not official ATC separation standards. Confirmation requires two qualifying poll cycles and at least 30 seconds by default; with the default 30-second poll interval, this typically adds about one interval after the first qualifying sample.
 
 ## Run the live-data CLI
 
@@ -81,50 +89,72 @@ From the repository root, with the virtual environment active and credentials ex
 python -m backend.airwatch.cli --once
 ```
 
-Omit `--once` to continue polling. The CLI and API use the same collector and both record successful source polls.
+Omit `--once` to continue polling. The API and CLI use the shared collector and record successful source polls.
 
-## API
+## Replay and evaluation
 
-- `GET /api/health` — collector status and latest update time.
-- `GET /api/airport` — airport center, configured monitoring radius, and map settings.
-- `GET /api/aircraft` — latest aircraft snapshot envelope.
-- `GET /api/coverage` — recent bucketed aircraft counts, counts below the configured altitude threshold, on-ground counts, and mean data age.
-- `WS /ws/live` — status and aircraft snapshot messages. Messages use `{type, ts, source_status, data}`.
+The API exposes replay controls for ranges recorded in `raw_states`. Replay is tagged `REPLAY`, kept separate from LIVE event queries, and does not write replayed observations back into the raw live-state table.
 
-`source_status` is `OK`, `DEGRADED`, or `NO_DATA`. The dashboard can additionally show `DISCONNECTED` when its WebSocket is unavailable.
-
-To query coverage locally:
+To evaluate a recorded time range without running the API:
 
 ```bash
-curl http://127.0.0.1:8000/api/coverage
+.venv/bin/python scripts/evaluate_alerts.py \
+  --start 2026-10-03T10:00:00Z \
+  --end 2026-10-03T11:00:00Z \
+  --profile research_default \
+  --db data/airwatch.db \
+  --output-dir reports/alert_evaluation
+```
+
+The script writes `alert_events.csv` and `alert_evaluation.md`, including cycle and aircraft-hour counts, alert rates by peak risk, duration statistics, data-loss resolutions, confidence share, and closest pairs. It reads recorded observations and does not modify the live raw-state database. For normal traffic, tune toward a low false-alert rate; the goal is not to find conflicts. Treat `sensitive_test` results as lifecycle/UI checks, not research findings.
+
+## API and WebSocket
+
+- `GET /api/health` — mode, source status, latest update, active risk profile.
+- `GET /api/airport` — airport center, monitoring radius, map and display settings.
+- `GET /api/aircraft` — current selected-mode aircraft states.
+- `GET /api/predictions` and `GET /api/aircraft/{icao24}/prediction` — prediction results and skip reasons.
+- `GET /api/pairs` — CPA metrics and pair-filter counts.
+- `GET /api/risk/config` — active profile and thresholds.
+- `GET /api/alerts/active?mode=LIVE|REPLAY` — active alerts for the selected mode.
+- `GET /api/events` — event history; filters include `status`, `risk`, `mode`, `aircraft`, `start`, `end`, `limit`, and `offset`. Mode defaults to LIVE.
+- `GET /api/events/{event_id}` — complete event details and state snapshots.
+- `GET /api/coverage` — recorded coverage summaries.
+- `GET /api/replay/status`, `POST /api/replay/start`, `POST /api/replay/stop` — replay controls.
+- `WS /ws/live` — aircraft/status snapshots plus `type: "alert"` messages with `opened`, `updated`, `escalated`, or `resolved` sub-events.
+
+Example:
+
+```bash
+curl http://127.0.0.1:8000/api/risk/config
+curl 'http://127.0.0.1:8000/api/events?mode=LIVE&limit=20'
 ```
 
 ## Data storage
 
-The default database is `data/airwatch.db` (ignored by Git). It uses SQLite WAL mode and contains:
+The default database is `data/airwatch.db` (ignored by Git), using SQLite. It contains:
 
-- `raw_states` — each state returned by the source, its raw payload, fetch time, source name, normalized fields, and quality flags. Null position, altitude, or velocity values are retained.
-- `coverage_samples` — one summary per successful poll, including empty polls.
+- `raw_states` — raw/normalized source observations and fetch timestamps.
+- `coverage_samples` — received aircraft counts and coverage summaries per poll.
+- `events` — alert lifecycle, LIVE/REPLAY mode, profile, current and worst CPA values, reasons, confidence, resolution, and aircraft snapshots.
 
-Times in the database are UTC epoch seconds. Database writing is batched on a background task so disk writes do not block the collector’s polling path.
+Event queries default to LIVE so replay events are not mixed into live history. Event timestamps use UTC epoch seconds. The event table is initialized and migrated by the service.
 
 ## Configuration
 
-Edit `config.yaml` to configure the airport ICAO and coordinates, radius, OpenSky endpoints, poll interval, backoff, estimated quota, history length, stale/drop times, optional alpha-beta smoothing, database path and batching, coverage window, and local CORS origins. Keep secrets in environment variables.
-
-`AIR_COL_CONFIG` can point the API to an alternate YAML configuration file.
+Edit `config.yaml` for airport coordinates and radius, OpenSky endpoints, polling and backoff, state quality/staleness, storage, replay, predictions, CPA, web display, and risk settings. Risk settings include named profiles, separation/time thresholds, filtering and adjustment policies, confirmation and clear hysteresis, cooldown, data-loss timeout, and confidence thresholds. `AIR_COL_CONFIG` can point to an alternate YAML file. Keep OAuth secrets in environment variables.
 
 ## Tests and build
 
 ```bash
 source .venv/bin/activate
 python -m pytest -q
-python -m compileall -q backend tests
+python -m compileall -q backend tests scripts
 npm --prefix frontend run build
 ```
 
-Tests use isolated numeric inputs or temporary databases; test data is not imported by the running application.
+Tests use isolated numeric inputs and temporary databases; test records are not imported by the running application.
 
 ## Limitations
 
-OpenSky coverage is incomplete and data age varies. Coverage measures received observations and cannot show aircraft the feed did not receive. The configured per-request credit cost is an estimate. Stale aircraft leave active state after the configured timeout and remain briefly in a last-seen record. This prototype does not yet perform conflict detection or runway incursion assessment.
+OpenSky coverage is incomplete and reported positions may be stale. CPA and trajectory predictions use simple constant-velocity models. Risk levels are configurable research estimates and have not been validated as operational criteria. Alerts are not operational warnings and must not be used for ATC, collision avoidance, or runway decisions.
