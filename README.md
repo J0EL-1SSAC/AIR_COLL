@@ -122,6 +122,8 @@ Set `runways.magnetic_variation_deg` in `config.yaml` to the current VOMM variat
 
 The dashboard requests `/api/runways`; if the CSV is missing or contains no VOMM runway rows, the UI reports that and draws no substitute geometry. Runway core is on by default; buffer and approach corridor layers are off by default. Click a runway to inspect its source metadata.
 
+The runway CSV is excluded from Git so a manual data download is not accidentally committed. Generated coverage reports are also ignored and can be regenerated from the local database at any time.
+
 Generate the read-only report from observations already in SQLite:
 
 ```bash
@@ -153,7 +155,11 @@ Example:
 ```bash
 curl http://127.0.0.1:8000/api/risk/config
 curl 'http://127.0.0.1:8000/api/events?mode=LIVE&limit=20'
+curl http://127.0.0.1:8000/api/runways
+curl http://127.0.0.1:8000/api/coverage/runway-summary
 ```
+
+`/api/coverage/runway-summary` returns HTTP 404 until `scripts/coverage_report.py` has written a report. `/api/runways` returns HTTP 503 with instructions if the manual runway dataset is missing; it never substitutes built-in geometry.
 
 ## Data storage
 
