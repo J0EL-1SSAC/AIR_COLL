@@ -1,0 +1,50 @@
+airport:
+  icao: VOMM
+  latitude: 12.9941
+  longitude: 80.1709
+  radius_nm: 40
+
+opensky:
+  token_url: https://auth.opensky-network.org/auth/realms/opensky/protocol/openid-connect/token
+  api_url: https://opensky-network.org/api/states/all
+  request_timeout_s: 20
+
+collector:
+  poll_interval_s: 30
+  max_backoff_s: 300
+  sparse_count_threshold: 3
+  low_altitude_ft: 1000
+
+state_manager:
+  history_length: 40
+  low_quality_after_s: 45
+  drop_after_s: 180
+  tombstone_s: 300
+  smoothing_enabled: false
+  alpha: 0.75
+  beta: 0.08
+
+storage:
+  database_path: data/airwatch.db
+  batch_size: 250
+  flush_interval_s: 2
+
+coverage:
+  window_s: 1800
+  bucket_s: 60
+
+api:
+  cors_origins:
+    - http://localhost:5173
+    - http://127.0.0.1:5173
+
+web:
+  map_zoom: 9
+  stale_after_s: 180
+  altitude_bands_m:
+    low_max: 304.8
+    medium_max: 3048
+  runway_ring_step_deg: 5
+  age_refresh_s: 1
+  reconnect_initial_ms: 1000
+  reconnect_max_ms: 15000
