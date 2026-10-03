@@ -152,3 +152,36 @@ web:
   prediction_ticks_min_zoom: 11
   trail_oldest_opacity: 0.18
   trail_newest_opacity: 0.82
+
+runways:
+  data_file: data/runways.csv
+  override_file: data/runways_override.yaml
+  include_closed: false
+  default_width_m: 45
+  # Look up current magnetic variation for VOMM and the chart/data effective date.
+  # East variation is positive; true heading = magnetic heading + variation.
+  magnetic_variation_deg: 0.0
+  heading_tolerance_deg: 12
+  max_threshold_distance_from_airport_m: 12000
+  length_tolerance_m: 150
+  buffer_lateral_m: 60
+  buffer_longitudinal_m: 90
+  approach_length_nm: 5
+  corridor_half_width_threshold_m: 900
+  corridor_half_width_far_m: 2500
+  approach_altitude_ceiling_m: 1500
+
+coverage_report:
+  output_dir: reports/coverage
+  ground_elevation_m: 16.4592
+  max_poll_gap_s: 90
+  max_track_gap_s: 180
+  minimum_track_reports: 3
+  altitude_bands_ft: [[0, 500, "0-500 ft"], [500, 1000, "500-1,000 ft"], [1000, 2000, "1,000-2,000 ft"], [2000, 3000, "2,000-3,000 ft"], [3000, 5000, "3,000-5,000 ft"], [5000, null, "above 5,000 ft"]]
+  distance_rings_nm: [[0, 2, "0-2 NM"], [2, 5, "2-5 NM"], [5, 10, "5-10 NM"], [10, 20, "10-20 NM"], [20, 40, "20-40 NM"]]
+  approach_altitude_ceiling_m: 457.2 # 1,500 ft above airport level
+  feasibility:
+    minimum_recording_hours: 6
+    minimum_low_altitude_reports_per_hour: 10
+    minimum_ground_reports_per_hour: 10
+    minimum_runway_buffer_reports_per_hour: 5

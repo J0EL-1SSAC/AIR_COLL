@@ -14,10 +14,11 @@ function Legend({airport}) {
   </div>;
 }
 
-export default function FiltersPanel({airport,counts, predictionCounts, mapLayers, onLayerChange, labelMode, onLabelMode, basemap, onBasemap, groundOnly, onGroundOnly}) {
+export default function FiltersPanel({airport,counts, predictionCounts, mapLayers, onLayerChange, labelMode, onLabelMode, basemap, onBasemap, groundOnly, onGroundOnly, runwayMessage}) {
   const layers = [
     ['trails','Trails'], ['predictions','Predictions'], ['uncertainty','Uncertainty circles'],
     ['closestApproaches','Closest-approach lines'], ['radius','Monitoring radius'],
+    ['runways','Runways'], ['runwayBuffer','Runway buffer'], ['approachCorridors','Approach corridors'],
   ];
   return <aside className="side-panel left" aria-label="Map layers and filters">
     <h2 className="panel-heading">Layers and filters</h2>
@@ -46,6 +47,7 @@ export default function FiltersPanel({airport,counts, predictionCounts, mapLayer
       </div>
     </section>
     <section className="panel-section"><h3 className="panel-heading">Legend</h3><Legend airport={airport}/></section>
+    {runwayMessage&&<p className="panel-note runway-unavailable" role="status">{runwayMessage}</p>}
     <p className="panel-note">Map tiles require internet access. Check CARTO and OpenStreetMap tile usage terms before sustained use.</p>
   </aside>;
 }

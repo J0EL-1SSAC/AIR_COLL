@@ -11,11 +11,14 @@ import BottomPanel from './components/BottomPanel';
 
 const apiBase=import.meta.env.VITE_API_BASE||'http://localhost:8000';
 const wsUrl=apiBase.replace(/^http/,'ws')+'/ws/live';
-const defaultLayers={trails:true,predictions:true,uncertainty:true,closestApproaches:true,radius:true};
+const defaultLayers={trails:true,predictions:true,uncertainty:true,closestApproaches:true,radius:true,runways:true,runwayBuffer:false,approachCorridors:false};
 const storedBasemap=()=>{try{return localStorage.getItem('aircol-basemap')==='light'?'light':'dark';}catch{return 'dark';}};
 
 function App(){
   const [airport,setAirport]=useState(null);
+  const [runways,setRunways]=useState([]);
+  const [selectedRunway,setSelectedRunway]=useState(null);
+  const [runwayMessage,setRunwayMessage]=useState('Loading runway data…');
   const [aircraft,setAircraft]=useState([]);
   const [predictions,setPredictions]=useState({});
   const [pairs,setPairs]=useState([]);
@@ -55,6 +58,15 @@ function App(){
     fetch(`${apiBase}/api/airport`).then(response=>response.ok?response.json():Promise.reject(new Error('Backend unavailable.')))
       .then(data=>{setAirport(data);setPairThresholds(data.cpa_display||{near_nm:1.5,amber_nm:3});})
       .catch(error=>{setStatus('DISCONNECTED');setMessage(`${error.message} No live data.`);});
+  },[]);
+
+  useEffect(()=>{
+    fetch(`${apiBase}/api/runways`).then(async response=>{
+      const body=await response.json();
+      if(!response.ok)throw new Error(body.detail||`Runway request failed (${response.status}).`);
+      return body;
+    }).then(data=>{setRunways(data.runways||[]);setRunwayMessage('');})
+      .catch(error=>{setRunways([]);setRunwayMessage(`Runway layers unavailable: ${error.message}`);});
   },[]);
 
   useEffect(()=>{
@@ -166,8 +178,9 @@ function App(){
     catch(error){setReplayMessage(error.message);}
     finally{setReplayBusy(false);}
   }
-  function focusPair(pair){setSelectedEvent(null);setFocusedEventId(null);setFocusedPair(pair);setSelectedId(pair.aircraft_a.icao24);}
+  function focusPair(pair){setSelectedRunway(null);setSelectedEvent(null);setFocusedEventId(null);setFocusedPair(pair);setSelectedId(pair.aircraft_a.icao24);}
   function focusAlert(event,inspect=false){
+    setSelectedRunway(null);
     setSelectedId(event.aircraft_1.icao24);setFocusedEventId(event.event_id);
     setSelectedEvent(inspect?event:null);
     setFocusedPair({pair_key:event.pair_key,cpa_position:{aircraft_a:{latitude:event.cpa_aircraft_a_lat,longitude:event.cpa_aircraft_a_lon},
@@ -189,14 +202,14 @@ function App(){
       riskProfile={riskConfig?.active_profile}
       lastUpdateAge={lastUpdateAge} onToggleLeft={()=>setLeftCollapsed(value=>!value)} onToggleRight={()=>setRightCollapsed(value=>!value)}/>
     <div className={workspaceClass}>
-      {!leftCollapsed&&<FiltersPanel airport={airport} counts={counts} predictionCounts={predictionCounts} mapLayers={mapLayers}
+      {!leftCollapsed&&<FiltersPanel airport={airport} counts={counts} predictionCounts={predictionCounts} mapLayers={mapLayers} runwayMessage={runwayMessage}
         onLayerChange={updateLayer} labelMode={labelMode} onLabelMode={setLabelMode} basemap={basemap} onBasemap={changeBasemap}
         groundOnly={groundOnly} onGroundOnly={setGroundOnly}/>}
-      <MapView airport={airport} aircraft={visibleAircraft} predictions={predictions} pairs={pairs}
+      <MapView airport={airport} runways={runways} aircraft={visibleAircraft} predictions={predictions} pairs={pairs}
         activeAlerts={activeAlerts} focusedEventId={focusedEventId}
-        selectedId={selectedId} onSelect={state=>setSelectedId(state.icao24)} focusPair={focusedPair}
+        selectedId={selectedId} onSelect={state=>{setSelectedRunway(null);setSelectedId(state.icao24);}} onSelectRunway={runway=>{setSelectedId(null);setSelectedEvent(null);setSelectedRunway(runway);}} focusPair={focusedPair}
         onFocusPair={focusPair} layers={mapLayers} labelMode={labelMode} basemap={basemap} onTileFailure={tileFailure} mapNotice={mapNotice}/>
-      {!rightCollapsed&&<DetailsPanel aircraft={selectedAircraft} prediction={selectedAircraft?predictions[selectedAircraft.icao24]:null} event={selectedEvent}/>}
+      {!rightCollapsed&&<DetailsPanel aircraft={selectedRunway?null:selectedAircraft} prediction={selectedAircraft?predictions[selectedAircraft.icao24]:null} event={selectedEvent} runway={selectedRunway}/>}
     </div>
     <BottomPanel pairs={pairs} thresholds={pairThresholds} replaySettings={airport.replay} replay={replay} onFocusPair={focusPair}
       alerts={activeAlerts} history={eventHistory} riskProfile={riskConfig?.active_profile} mode={mode} alertFilters={alertFilters}

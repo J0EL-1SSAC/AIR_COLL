@@ -1,5 +1,5 @@
 import React, {useEffect, useMemo, useState} from 'react';
-import {Circle, CircleMarker, MapContainer, Marker, Pane, Polygon, Polyline, TileLayer, Tooltip, useMap} from 'react-leaflet';
+import {Circle, CircleMarker, GeoJSON, MapContainer, Marker, Pane, Polygon, Polyline, TileLayer, Tooltip, useMap} from 'react-leaflet';
 import L from 'leaflet';
 import {ALTITUDE_BANDS, DISTANCE_FORMAT, UI} from '../config';
 
@@ -128,6 +128,46 @@ function AirportMarker({airport}) {
   return <Marker position={[airport.latitude,airport.longitude]} icon={icon} pane="airports"><Tooltip permanent direction="right" className="airport-label">{airport.icao}</Tooltip></Marker>;
 }
 
+function RunwayLayer({runways, layers, onSelectRunway}) {
+  return <>
+    {runways.map(runway=><React.Fragment key={`runway-${runway.identifier}`}>
+      {layers.runwayBuffer&&runway.buffer_geojson&&<>
+        <GeoJSON data={runway.buffer_geojson} pane="runway-buffers"
+          style={{color:'var(--color-runway-casing)',weight:4,opacity:.8,fillOpacity:0,dashArray:'5 5'}}/>
+        <GeoJSON data={runway.buffer_geojson} pane="runway-buffers"
+          style={{color:'var(--color-runway-buffer)',weight:1.7,opacity:1,fillColor:'var(--color-runway-buffer)',fillOpacity:.05,dashArray:'5 5'}}/>
+      </>}
+      {layers.approachCorridors&&[runway.end_a,runway.end_b].map(end=><React.Fragment key={`${runway.identifier}-corridor-${end.identifier}`}>
+        <GeoJSON data={end.corridor_geojson} pane="runway-corridors"
+          style={{color:'var(--color-runway-casing)',weight:3.5,opacity:.8,fillColor:'var(--color-runway-casing)',fillOpacity:.025,dashArray:'3 5'}}/>
+        <GeoJSON data={end.corridor_geojson} pane="runway-corridors"
+          style={{color:'var(--color-runway-corridor)',weight:1,opacity:.8,fillColor:'var(--color-runway-corridor)',fillOpacity:.09,dashArray:'3 5'}}/>
+        <Polyline pane="runway-corridors" positions={[
+          [end.latitude,end.longitude],
+          [((end.corridor_geojson.geometry.coordinates[0][2][1]+end.corridor_geojson.geometry.coordinates[0][3][1])/2),
+           ((end.corridor_geojson.geometry.coordinates[0][2][0]+end.corridor_geojson.geometry.coordinates[0][3][0])/2)],
+        ]} pathOptions={{color:'var(--color-runway-corridor-line)',weight:1.5,opacity:.75,dashArray:'4 5'}}/>
+      </React.Fragment>)}
+      {layers.runways&&<>
+        <GeoJSON data={runway.core_geojson} pane="runway-core"
+          style={{color:'var(--color-runway-casing)',weight:5,opacity:1,fillColor:'var(--color-runway-pavement)',fillOpacity:.48}}
+          eventHandlers={{click:()=>onSelectRunway(runway)}}/>
+        <GeoJSON data={runway.core_geojson} pane="runway-core"
+          style={{color:'var(--color-runway-outline)',weight:2.4,opacity:1,fillOpacity:0}}
+          eventHandlers={{click:()=>onSelectRunway(runway)}}/>
+        <GeoJSON data={runway.centerline_geojson} pane="runway-core"
+          style={{color:'var(--color-runway-centerline)',weight:1.2,opacity:.9,dashArray:'8 5'}}
+          eventHandlers={{click:()=>onSelectRunway(runway)}}/>
+        {[runway.end_a,runway.end_b].map(end=><CircleMarker key={`${runway.identifier}-end-${end.identifier}`} pane="airport-labels"
+          center={[end.latitude,end.longitude]} radius={4} pathOptions={{color:'var(--color-runway-outline)',weight:1.5,fillColor:'var(--color-runway-end)',fillOpacity:1}}
+          eventHandlers={{click:()=>onSelectRunway(runway)}}>
+          <Tooltip permanent direction="top" className="runway-end-label">{end.identifier}</Tooltip>
+        </CircleMarker>)}
+      </>}
+    </React.Fragment>)}
+  </>;
+}
+
 function MapController({setZoom,focusPair}) {
   const map = useMap();
   useEffect(()=>{const update=()=>setZoom(map.getZoom());map.on('zoomend',update);update();return()=>map.off('zoomend',update);},[map,setZoom]);
@@ -149,7 +189,7 @@ function MapSizeHandler(){
   return null;
 }
 
-export default function MapView({airport,aircraft,predictions,pairs,activeAlerts=[],focusedEventId,selectedId,onSelect,focusPair,onFocusPair,layers,labelMode,basemap,onTileFailure,mapNotice}) {
+export default function MapView({airport,runways=[],aircraft,predictions,pairs,activeAlerts=[],focusedEventId,selectedId,onSelect,onSelectRunway=()=>{},focusPair,onFocusPair,layers,labelMode,basemap,onTileFailure,mapNotice}) {
   const bandColors = ALTITUDE_BANDS;
   const stateById = Object.fromEntries(aircraft.map(state=>[state.icao24,state]));
   const [zoom,setZoom] = useState(airport.map_zoom);
@@ -183,11 +223,13 @@ export default function MapView({airport,aircraft,predictions,pairs,activeAlerts
       <Pane name="trails" style={{zIndex:UI.panes.trails}}/><Pane name="pairs" style={{zIndex:UI.panes.pairs}}/>
       <Pane name="prediction-halo" style={{zIndex:UI.panes.predictionHalo}}/><Pane name="predictions" style={{zIndex:UI.panes.predictions}}/>
       <Pane name="uncertainty" style={{zIndex:UI.panes.uncertainty}}/><Pane name="alerts" style={{zIndex:UI.panes.alerts}}/>
-      <Pane name="airports" style={{zIndex:UI.panes.airports}}/>
+      <Pane name="runway-buffers" style={{zIndex:UI.panes.runwayBuffers}}/><Pane name="runway-corridors" style={{zIndex:UI.panes.runwayCorridors}}/>
+      <Pane name="runway-core" style={{zIndex:UI.panes.runwayCore}}/><Pane name="airports" style={{zIndex:UI.panes.airports}}/>
+      <Pane name="airport-labels" style={{zIndex:UI.panes.airportLabels}}/>
       <TileLayer key={basemap} url={UI.tileUrls[basemap]} attribution={UI.tileAttribution[basemap]}
         eventHandlers={{tileerror:onTileFailure}}/>
       {layers.radius&&<Polygon positions={ring} pane="trails" pathOptions={{color:'var(--color-accent)',weight:1.5,opacity:.7,fillOpacity:.015,dashArray:'6 7'}}/>}
-      {/* Phase 8 runway geometries will be drawn in this map layer group. */}
+      <RunwayLayer runways={runways} layers={layers} onSelectRunway={onSelectRunway}/>
       {layers.trails&&aircraft.map(state=><TrailLayer key={`trail-${state.icao24}`} aircraft={state}
         color={bandColors[altitudeBand(state,airport.altitude_bands_m)]}
         oldestOpacity={airport.trail_oldest_opacity??UI.oldestTrailOpacityFallback}

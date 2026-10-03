@@ -62,6 +62,14 @@
   --color-airport-glow: #47b5e8;
   --color-airport-glow-soft: #47b5e833;
   --color-airport-label: #effaff;
+  --color-runway-outline: #ffe08a;
+  --color-runway-casing: #122131;
+  --color-runway-pavement: #d8e2ec;
+  --color-runway-buffer: #8fd3ff;
+  --color-runway-corridor: #a9cbff;
+  --color-runway-corridor-line: #ffe08a;
+  --color-runway-centerline: #1b2837;
+  --color-runway-end: #fff1bc;
   --color-cpa-outline: #151a20;
   --color-prediction: #ffe071;
   --color-prediction-halo: #050a11;

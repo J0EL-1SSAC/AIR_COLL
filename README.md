@@ -18,8 +18,10 @@ The running application uses real OpenSky data only. It never substitutes demo a
 - CPA calculations and configurable LOW/MEDIUM/HIGH/CRITICAL risk profiles.
 - Alert confirmation, hysteresis, escalation, cooldown continuation, and `data_lost` resolution.
 - Headless evaluation of recorded ranges, with CSV and Markdown reports.
+- Runway-end model with ENU core/buffer polygons, extended centerlines, and approach corridors (uses a user-supplied runway CSV).
+- Read-only surveillance coverage report with altitude/distance bands, report age, fade-out heuristics, and runway coverage when runway geometry is available.
 
-Runway geometry, runway occupancy, and runway conflict detection are not implemented yet.
+Runway occupancy and runway conflict detection are not implemented yet. Runway geometry and coverage are research aids and require verification against official charts.
 
 ## Requirements
 
@@ -108,6 +110,27 @@ To evaluate a recorded time range without running the API:
 
 The script writes `alert_events.csv` and `alert_evaluation.md`, including cycle and aircraft-hour counts, alert rates by peak risk, duration statistics, data-loss resolutions, confidence share, and closest pairs. It reads recorded observations and does not modify the live raw-state database. For normal traffic, tune toward a low false-alert rate; the goal is not to find conflicts. Treat `sensitive_test` results as lifecycle/UI checks, not research findings.
 
+## Runway data and coverage report
+
+The application does not download runway data. Download `runways.csv` manually from the [OurAirports data downloads page](https://ourairports.com/data/) and save it as `data/runways.csv` in the project root. The dataset is public-domain but has no guarantee of accuracy or fitness for use. The optional `data/runways_override.yaml` file supports documented corrections; each applied override is logged.
+
+Set `runways.magnetic_variation_deg` in `config.yaml` to the current VOMM variation for the data/chart effective date. The default zero is treated as unconfirmed and produces a warning. Positive east variation follows `true heading = magnetic heading + variation`. Run the verification script and compare every threshold, length, width, and heading with the official AIP or aerodrome chart:
+
+```bash
+.venv/bin/python scripts/verify_runways.py
+```
+
+The dashboard requests `/api/runways`; if the CSV is missing or contains no VOMM runway rows, the UI reports that and draws no substitute geometry. Runway core is on by default; buffer and approach corridor layers are off by default. Click a runway to inspect its source metadata.
+
+Generate the read-only report from observations already in SQLite:
+
+```bash
+.venv/bin/python scripts/coverage_report.py \
+  --db data/airwatch.db --output-dir reports/coverage
+```
+
+Optional UTC bounds use `--start 2026-10-03T10:00:00Z --end 2026-10-03T11:00:00Z`. Outputs include Markdown, a compact JSON summary, and CSVs for altitude/distance bands, hourly coverage, fade-out tracks and histograms, update intervals, runway buffers, and approach corridors. Without runway geometry the script still reports non-runway metrics, marks runway metrics unavailable, and never infers missing aircraft. Short recordings are labeled insufficient data using thresholds in `config.yaml`.
+
 ## API and WebSocket
 
 - `GET /api/health` — mode, source status, latest update, active risk profile.
@@ -120,6 +143,8 @@ The script writes `alert_events.csv` and `alert_evaluation.md`, including cycle 
 - `GET /api/events` — event history; filters include `status`, `risk`, `mode`, `aircraft`, `start`, `end`, `limit`, and `offset`. Mode defaults to LIVE.
 - `GET /api/events/{event_id}` — complete event details and state snapshots.
 - `GET /api/coverage` — recorded coverage summaries.
+- `GET /api/runways` — runway metadata and core, buffer, centerline, and approach-corridor GeoJSON in longitude/latitude order; returns an actionable error if the runway file is missing.
+- `GET /api/coverage/runway-summary` — headlines from the latest generated report (404 until a report exists).
 - `GET /api/replay/status`, `POST /api/replay/start`, `POST /api/replay/stop` — replay controls.
 - `WS /ws/live` — aircraft/status snapshots plus `type: "alert"` messages with `opened`, `updated`, `escalated`, or `resolved` sub-events.
 
@@ -142,7 +167,7 @@ Event queries default to LIVE so replay events are not mixed into live history. 
 
 ## Configuration
 
-Edit `config.yaml` for airport coordinates and radius, OpenSky endpoints, polling and backoff, state quality/staleness, storage, replay, predictions, CPA, web display, and risk settings. Risk settings include named profiles, separation/time thresholds, filtering and adjustment policies, confirmation and clear hysteresis, cooldown, data-loss timeout, and confidence thresholds. `AIR_COL_CONFIG` can point to an alternate YAML file. Keep OAuth secrets in environment variables.
+Edit `config.yaml` for airport coordinates/radius, OpenSky endpoints, polling/backoff, state quality/staleness, storage, replay, predictions, CPA, web display, runway model/validation/geometry, coverage analysis, and risk settings. Risk settings include named profiles, separation/time thresholds, filtering and adjustment policies, confirmation and clear hysteresis, cooldown, data-loss timeout, and confidence thresholds. `AIR_COL_CONFIG` can point to an alternate YAML file. Keep OAuth secrets in environment variables.
 
 ## Tests and build
 
@@ -157,4 +182,4 @@ Tests use isolated numeric inputs and temporary databases; test records are not 
 
 ## Limitations
 
-OpenSky coverage is incomplete and reported positions may be stale. CPA and trajectory predictions use simple constant-velocity models. Risk levels are configurable research estimates and have not been validated as operational criteria. Alerts are not operational warnings and must not be used for ATC, collision avoidance, or runway decisions.
+OpenSky coverage is incomplete and reported positions may be stale. CPA and trajectory predictions use simple constant-velocity models. Risk levels are configurable research estimates and have not been validated as operational criteria. OurAirports runway records may be wrong or stale; heading checks use the manually configured magnetic variation and are warnings only. Fade-out classification is heuristic and reports the last/first received observation, not an actual aircraft disappearance. Alerts are not operational warnings and must not be used for ATC, collision avoidance, or runway decisions.

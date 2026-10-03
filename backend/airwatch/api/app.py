@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import time
@@ -23,6 +24,7 @@ from ..pairs import compute_pair_cpas
 from ..replay import ReplaySource
 from ..risk import validate_timing_settings
 from ..storage import SQLiteRecorder
+from ..runways import RunwayDataError, load_runways
 
 ROOT = Path(__file__).resolve().parents[3]
 CONFIG_PATH = Path(os.environ.get("AIR_COL_CONFIG", ROOT / "config.yaml"))
@@ -319,6 +321,47 @@ async def coverage():
     settings = CONFIG["coverage"]
     since = app.state.live_clock.now() - float(settings["window_s"])
     return await asyncio.to_thread(app.state.recorder.coverage, since=since, bucket_s=int(settings["bucket_s"]))
+
+
+def runway_definitions():
+    settings = dict(CONFIG["runways"])
+    data_path = Path(settings["data_file"])
+    override_path = Path(settings["override_file"])
+    settings["data_file"] = data_path if data_path.is_absolute() else ROOT / data_path
+    settings["override_file"] = override_path if override_path.is_absolute() else ROOT / override_path
+    return load_runways(airport_ident=CENTER.icao, latitude=float(AIRPORT["latitude"]),
+                        longitude=float(AIRPORT["longitude"]), settings=settings)
+
+
+@app.get("/api/runways")
+async def runways():
+    try:
+        definitions = await asyncio.to_thread(runway_definitions)
+    except RunwayDataError as error:
+        raise HTTPException(503, str(error)) from error
+    from ..geometry import local_transformers
+    _forward, inverse = local_transformers(float(AIRPORT["latitude"]), float(AIRPORT["longitude"]))
+    return {"airport": CENTER.icao, "runways": [item.as_dict(inverse_transformer=inverse) for item in definitions]}
+
+
+@app.get("/api/coverage/runway-summary")
+async def runway_coverage_summary():
+    output = CONFIG["coverage_report"].get("output_dir", "reports/coverage")
+    path = Path(output)
+    if not path.is_absolute():
+        path = ROOT / path
+    summary_path = path / "coverage_summary.json"
+    if not summary_path.exists():
+        raise HTTPException(404, "No coverage report is available yet. Run scripts/coverage_report.py to generate it.")
+    try:
+        data = json.loads(summary_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise HTTPException(503, "The saved coverage summary cannot be read.") from error
+    return {"recording": data.get("recording"), "runways_available": data.get("runways_available"),
+            "low_altitude_reports_per_hour": data.get("low_altitude_reports_per_hour"),
+            "on_ground_reports_per_hour": data.get("on_ground_reports_per_hour"),
+            "runway_buffer_report_total": data.get("runway_buffer_report_total"),
+            "recommendations": data.get("recommendations")}
 
 
 @app.get("/api/replay/status")

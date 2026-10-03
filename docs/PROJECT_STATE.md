@@ -1,4 +1,4 @@
-# AIR_COL project state — Phase 7
+# AIR_COL project state — Phase 8
 
 AIR_COL is a research and education prototype for live ADS-B around one configured airport. It is **not ATC, TCAS/ACAS, or a certified safety system**. It uses live OpenSky observations and app-recorded observations for replay and offline evaluation. It does not generate fallback or demo aircraft. Potential Aircraft Conflict entries are research estimates, not official separation determinations.
 
@@ -17,14 +17,17 @@ AIR_COL/
 │   ├── clock.py
 │   ├── collector.py
 │   ├── cpa.py
+│   ├── coverage_analysis.py
 │   ├── evaluation.py
 │   ├── event_store.py
+│   ├── geometry.py
 │   ├── models.py
 │   ├── opensky.py
 │   ├── pairs.py
 │   ├── prediction.py
 │   ├── replay.py
 │   ├── risk.py
+│   ├── runways.py
 │   ├── state_manager.py
 │   └── storage.py
 ├── frontend/
@@ -37,8 +40,8 @@ AIR_COL/
 │       ├── config.js
 │       ├── main.jsx
 │       └── style.css
-├── scripts/evaluate_alerts.py
-├── tests/{test_alerts,test_config,test_cpa,test_enu_frame,test_event_store,test_evaluation,test_opensky_limits,test_pairs,test_prediction,test_replay,test_risk,test_state_manager,test_storage}.py
+├── scripts/{coverage_report,evaluate_alerts,verify_runways}.py
+├── tests/{test_alerts,test_config,test_cpa,test_coverage_analysis,test_enu_frame,test_event_store,test_evaluation,test_geometry,test_opensky_limits,test_pairs,test_prediction,test_replay,test_risk,test_runways,test_state_manager,test_storage}.py
 └── docs/PROJECT_STATE.md
 ```
 
@@ -89,7 +92,9 @@ The default collector poll interval is 30 seconds. Confirmation requires two qua
 - `GET /api/alerts/active?mode=LIVE|REPLAY`: current candidate/active/escalated entries. When omitted, mode follows the selected pipeline.
 - `GET /api/events`: paginated event history. Filters are `status`, `risk`, `mode`, `aircraft` (ICAO24), `start`, `end` (UTC epoch seconds), `limit`, and `offset`. Mode defaults to LIVE; query REPLAY explicitly to see replay events.
 - `GET /api/events/{event_id}`: full stored event with snapshots, score components, reasons, and CPA coordinates.
-- `GET /api/coverage`: recorded live coverage.
+- `GET /api/coverage`: recent recorded live coverage.
+- `GET /api/runways`: runway metadata plus core, buffer, extended centerline and approach corridor GeoJSON in standard `[longitude, latitude]` coordinate order. Returns HTTP 503 with manual file instructions if runway data is missing or contains no matching airport rows.
+- `GET /api/coverage/runway-summary`: headline numbers from `coverage_report.output_dir/coverage_summary.json`, HTTP 404 until the report script has generated one.
 - Replay: `GET /api/replay/status`, `POST /api/replay/start` with optional `{start_time,end_time,speed}`, and `POST /api/replay/stop`.
 - `/ws/live`: existing snapshot envelope `{type,mode,ts,source_status,data}`. Alert messages use `type: "alert"`, the same outer envelope, and `data: {sub_event,event}` where `sub_event` is `opened`, `updated`, `escalated`, or `resolved`.
 
@@ -119,7 +124,28 @@ Arguments `--start` and `--end` require ISO timestamps with `Z` or a UTC offset.
 
 ## Configuration
 
-`config.yaml` holds airport, OpenSky, polling/backoff, state quality/staleness, storage, coverage, replay, prediction, CPA, web, and new `risk` settings. Risk includes active profile, level thresholds, alert age/lookahead limits, conservative unknown-vertical policy, filters, confirmation cycles/seconds, clear cycles/seconds, cooldown, data-loss timeout, confidence thresholds, and named profiles. It contains the comment that thresholds are research/demo values and not official ATC separation standards. Secrets remain environment-only. No dependency was added in Phase 7.
+`config.yaml` holds airport, OpenSky, polling/backoff, state quality/staleness, storage, coverage, replay, prediction, CPA, web, risk, runway and coverage-report settings. Runway values include the CSV/override paths, closed-runway policy, default width, magnetic variation, validation tolerances, buffer expansion, corridor dimensions, and ceiling. Coverage settings include the above-airport altitude bands, airport-distance rings, poll/track gap definitions, minimum sample counts, and recommendation criteria. No dependency was added in Phase 8; Shapely and pyproj were already present.
+
+## Phase 8 runway model and geometry
+
+`backend/airwatch/runways.py` parses OurAirports `runways.csv` locally; the service never downloads data. Put the manually downloaded file at `data/runways.csv`. Optional `data/runways_override.yaml` corrections are logged when applied. The loader rejects a missing or malformed dataset with a specific explanation, filters closed surfaces according to config, falls back to a configured width when the source width is blank, and emits validation warnings for heading/designator+variation, threshold distance from airport reference, and source length versus coordinate length. Headings are computed geodetically from threshold coordinates. Designator headings are magnetic; configured positive-east variation uses true = magnetic + variation. A zero variation remains a warning until the current value for the data/chart effective date is checked.
+
+`backend/airwatch/geometry.py` contains pure ENU/Shapely helpers. Runway core polygons use endpoint coordinates and width; buffered polygons expand laterally and longitudinally. Each end has a displaced-threshold-aware approach trapezoid extending outward on reciprocal runway heading. The runway centerline extends on both ends by configured approach length. API geometry is transformed back into standard GeoJSON longitude/latitude. No aircraft/runway classification or runway alerts are present in this phase.
+
+Verification and coverage commands:
+
+```bash
+# Save the manual download to data/runways.csv first
+.venv/bin/python scripts/verify_runways.py
+.venv/bin/python scripts/coverage_report.py \
+  --db data/airwatch.db --output-dir reports/coverage
+```
+
+The verification output prints computed true and magnetic headings plus magnetic designator headings and reminds the operator to compare with official AIP/aerodrome charts. `coverage_report.py` opens the SQLite database read-only and analyzes only recorded source data. It writes report Markdown, a compact JSON summary for the API, and CSVs for altitude bands, distance rings, hourly counts, update intervals, fade-out tracks/histograms, buffer hits, and corridor hits. Its arrival/departure classifications are simple heuristics from descending/climbing and moving closer/farther; they describe last/first received reports, not actual disappearance. With no runway CSV, non-runway statistics still run and runway-dependent measures are explicitly unavailable. A recording under configured minimum duration is labeled insufficient data.
+
+## Phase 8 current input/report state
+
+At the final Phase 8 verification, `data/runways.csv` and `data/runways_override.yaml` were absent. The live collector continued recording while the report ran. The latest report contained 1,855 raw-state rows, 362 poll cycles, 59 distinct aircraft over 3.32 hours, with 11 poll gaps above the configured 90 seconds. It showed 213 reports in the 0–500 ft band, 163 in 500–1,000 ft, no received on-ground reports, and median data age about 6.66 s. The data is below the configured six-hour minimum; runway geometry was unavailable, so runway-specific recommendations are **insufficient data**. Counts can increase while collection remains active. These values describe received reports only, not complete receiver coverage.
 
 ## Verification
 
@@ -129,8 +155,8 @@ npm --prefix frontend run build
 .venv/bin/python -m backend.airwatch.cli --once
 ```
 
-Tests include risk boundaries and adjustments, lifecycle/hysteresis/cooldown/data loss, event-store filters, and deterministic evaluation with an isolated temporary database. The API CLI remains live-only and never substitutes demo data.
+Tests include risk boundaries/adjustments, lifecycle/hysteresis/cooldown/data loss, event-store filters, deterministic evaluation, runway data loading/validation, ENU geometry edge cases, and read-only coverage analysis on temporary databases. Test inputs are isolated to tests and are not used by the running application. The API and CLI remain live-only and never substitute demo aircraft.
 
 ## Known limitations
 
-The risk profiles are configurable research examples, not validated separation criteria. The CPA itself assumes constant horizontal velocity and vertical rate and inherits public ADS-B latency, missing reports, and position error. Candidate confirmation adds an additional poll interval. A risk result and any alert are not an operational warning and must not be used for ATC, collision avoidance, or runway decisions. A long busy replay or evaluation can produce many event updates; SQLite writes are asynchronous through a worker thread, while event history is retained.
+The risk profiles are configurable research examples, not validated separation criteria. The CPA itself assumes constant horizontal velocity and vertical rate and inherits public ADS-B latency, missing reports, and position error. Candidate confirmation adds an additional poll interval. Runway records and magnetic variation must be checked against the current official AIP/aerodrome charts; the validation checks are warnings only. Public ADS-B generally cannot establish reliable ground/runway occupancy because low-altitude and surface coverage can be poor. Coverage report movement-direction classes are heuristics, not flight phase labels from an authoritative source. Alerts and runway geometry are not operational data and must not be used for ATC, separation, collision avoidance, or runway decisions.

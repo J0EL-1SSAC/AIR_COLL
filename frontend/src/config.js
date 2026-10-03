@@ -14,7 +14,7 @@ export const UI = {
   alertLineWidth: 3,
   alertCpaRadius: 7,
   updateAgeTickMs: 1000,
-  panes: {trails:410,pairs:420,predictionHalo:430,predictions:440,uncertainty:435,alerts:450,airports:610},
+  panes: {runwayBuffers:390,runwayCorridors:395,runwayCore:400,trails:410,pairs:420,predictionHalo:430,predictions:440,uncertainty:435,alerts:450,airports:610,airportLabels:615},
   tileUrls: {
     dark: 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
     light: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
