@@ -35,6 +35,13 @@ coverage:
   window_s: 1800
   bucket_s: 60
 
+replay:
+  default_speed: 10
+  min_speed: 1
+  max_speed: 60
+  speed_steps: [1, 5, 10, 30, 60]
+  queue_size: 1
+
 api:
   cors_origins:
     - http://localhost:5173

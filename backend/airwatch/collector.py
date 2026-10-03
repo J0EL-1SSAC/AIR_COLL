@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timezone
 from typing import Any
 
 from pyproj import Transformer
 
 from .models import AirportCenter
+from .clock import Clock, LiveClock
 from .opensky import DataSource
 from .state_manager import AircraftStateManager
 from .storage import SQLiteRecorder
@@ -40,11 +40,15 @@ class LiveCollector:
     def __init__(self, *, source: DataSource, center: AirportCenter, radius_nm: float,
                  poll_interval_s: float, max_backoff_s: float, sparse_count_threshold: int,
                  low_altitude_ft: float, manager_config: dict, recorder: SQLiteRecorder,
-                 daily_credit_quota: float, estimated_credits_per_request: float):
+                 daily_credit_quota: float, estimated_credits_per_request: float,
+                 clock: Clock | None = None, mode: str = "LIVE", record_live: bool = True,
+                 on_publish=None):
         self.source, self.center, self.radius_nm = source, center, radius_nm
         self.poll_interval_s, self.max_backoff_s = poll_interval_s, max_backoff_s
         log_daily_quota_warning(poll_interval_s, daily_credit_quota, estimated_credits_per_request)
         self.sparse_count_threshold, self.low_altitude_m = sparse_count_threshold, low_altitude_ft / _M_TO_FT
+        self.clock, self.mode, self.record_live = clock or LiveClock(), mode, record_live
+        self.on_publish = on_publish
         self.latest: list[dict[str, Any]] = []
         self.status = "NO_DATA"
         self.message = "Waiting for the first live OpenSky response."
@@ -72,6 +76,8 @@ class LiveCollector:
 
     def _publish(self, kind: str) -> None:
         envelope = self.envelope(kind)
+        if self.on_publish is not None:
+            self.on_publish(self, envelope)
         for queue in tuple(self._listeners):
             if queue.full():
                 try:
@@ -84,7 +90,7 @@ class LiveCollector:
                 pass
 
     def envelope(self, kind: str) -> dict[str, Any]:
-        return {"type": kind, "ts": self.updated_at or datetime.now(timezone.utc).isoformat(),
+        return {"type": kind, "mode": self.mode, "ts": self.updated_at or self.clock.isoformat(),
                 "source_status": self.status,
                 "data": {"aircraft": self.latest, "message": self.message,
                          "aircraft_count": self.aircraft_count,
@@ -92,24 +98,25 @@ class LiveCollector:
                          "recently_lost": [item["state"] for item in self.manager.recently_lost.values()]}}
 
     async def poll_once(self) -> bool:
-        self.updated_at = datetime.now(timezone.utc).isoformat()
+        self.updated_at = self.clock.isoformat()
         try:
             states = await self.source.fetch_states(self.center, self.radius_nm)
         except Exception as exc:
-            logger.warning("OpenSky degraded: %s", exc)
+            logger.warning("%s source degraded: %s", self.mode, exc)
             self.retry_after_s = getattr(exc, "retry_after_s", None)
-            now = datetime.now(timezone.utc).timestamp()
+            now = self.clock.now()
             self.manager.expire(now)
             self.latest = self.manager.snapshot(now)
             counts = self.manager.coverage_counts(now)
             self.aircraft_count = counts["aircraft_count"]
             self.low_or_ground_count = counts["low_or_ground_count"]
-            self.status, self.message = "DEGRADED", f"Live source unavailable: {exc}"
+            self.status, self.message = "DEGRADED", f"{self.mode} source unavailable: {exc}"
             self._publish("status")
             return False
-        now = datetime.now(timezone.utc).timestamp()
+        now = self.clock.now()
         self.retry_after_s = None
-        await self.recorder.record_batch(states, now, "opensky")
+        if self.record_live and self.mode == "LIVE" and self.recorder is not None:
+            await self.recorder.record_batch(states, now, "opensky")
         self.manager.update(states, now)
         self.latest = self.manager.snapshot(now)
         counts = self.manager.coverage_counts(now)
@@ -122,7 +129,7 @@ class LiveCollector:
             self.status, self.message = "DEGRADED", f"Sparse public ADS-B coverage: {len(self.latest)} aircraft observed."
             kind = "snapshot"
         else:
-            self.status, self.message, kind = "OK", "Live OpenSky data received.", "snapshot"
+            self.status, self.message, kind = "OK", f"{self.mode.title()} data received.", "snapshot"
         self._publish(kind)
         return True
 
@@ -137,4 +144,4 @@ class LiveCollector:
                 failures += 1
                 delay = self.retry_after_s if self.retry_after_s is not None else min(
                     self.max_backoff_s, self.poll_interval_s * (2 ** min(failures - 1, 8)))
-            await asyncio.sleep(delay)
+            await self.clock.sleep(delay)
