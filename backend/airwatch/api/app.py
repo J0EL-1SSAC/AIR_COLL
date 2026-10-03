@@ -16,6 +16,7 @@ from ..clock import LiveClock, ReplayClock
 from ..collector import LiveCollector
 from ..models import AirportCenter
 from ..opensky import OpenSkySource
+from ..pairs import compute_pair_cpas
 from ..replay import ReplaySource
 from ..storage import SQLiteRecorder
 
@@ -164,7 +165,15 @@ async def airport():
             "age_refresh_s": float(CONFIG.get("web", {}).get("age_refresh_s", 1)),
             "reconnect_initial_ms": int(CONFIG.get("web", {}).get("reconnect_initial_ms", 1000)),
             "reconnect_max_ms": int(CONFIG.get("web", {}).get("reconnect_max_ms", 15000)),
-            "replay": CONFIG["replay"]}
+            "low_altitude_ft": float(CONFIG["collector"]["low_altitude_ft"]),
+            "labels_min_zoom": int(CONFIG["web"].get("labels_min_zoom", 11)),
+            "prediction_ticks_min_zoom": int(CONFIG["web"].get("prediction_ticks_min_zoom", 11)),
+            "trail_oldest_opacity": float(CONFIG["web"].get("trail_oldest_opacity", 0.18)),
+            "trail_newest_opacity": float(CONFIG["web"].get("trail_newest_opacity", 0.82)),
+            "replay": CONFIG["replay"], "cpa_display": {
+                "near_nm": float(CONFIG["cpa"]["display_near_nm"]),
+                "amber_nm": float(CONFIG["cpa"]["display_amber_nm"]),
+            }}
 
 
 @app.get("/api/aircraft")
@@ -197,6 +206,22 @@ async def aircraft_prediction(icao24: str):
         raise HTTPException(404, "Aircraft is not currently active in the selected pipeline.")
     return {"mode": result["mode"], "updated_at": result["updated_at"], "model": result["model"],
             "horizons_s": result["horizons_s"], "prediction": prediction}
+
+
+@app.get("/api/pairs")
+async def pairs():
+    collector = app.state.active_collector
+    now = collector.clock.now()
+    collector.manager.expire(now)
+    states = collector.manager.snapshot(now, include_unpositioned=True)
+    result = compute_pair_cpas(
+        states,
+        airport_radius_nm=float(AIRPORT["radius_nm"]),
+        cpa_settings=CONFIG["cpa"],
+        prediction_settings=CONFIG["prediction"],
+        inverse_transformer=collector.predictor.inverse_transformer,
+    )
+    return {"mode": collector.mode, "updated_at": collector.clock.isoformat(), **result}
 
 
 @app.get("/api/coverage")

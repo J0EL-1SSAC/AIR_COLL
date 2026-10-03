@@ -8,3 +8,5 @@ def test_dashboard_configuration_is_coherent():
     assert config["airport"]["radius_nm"] > 0
     assert config["collector"]["poll_interval_s"] > 0
     assert config["web"]["altitude_bands_m"]["low_max"] < config["web"]["altitude_bands_m"]["medium_max"]
+    assert config["cpa"]["lookahead_s"] > 0
+    assert config["cpa"]["horizontal_cutoff_nm"] > 0

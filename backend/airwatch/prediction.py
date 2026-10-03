@@ -19,6 +19,14 @@ def track_to_velocity_components(speed_mps: float, track_deg: float) -> tuple[fl
     return speed_mps * math.sin(angle_rad), speed_mps * math.cos(angle_rad)
 
 
+def uncertainty_radius_m(*, horizon_s: float, age_s: float, settings: Mapping) -> float:
+    """Phase 5 linear uncertainty model, shared with pair uncertainty propagation."""
+    uncertainty = settings["uncertainty"]
+    return (float(uncertainty["base_position_error_m"]) +
+            float(uncertainty["speed_error_mps"]) * float(horizon_s) +
+            float(uncertainty["age_error_m_per_s"]) * float(age_s))
+
+
 class ConstantVelocityPredictor:
     """Predict along a straight ENU path using source-clock age compensation."""
 
@@ -30,10 +38,7 @@ class ConstantVelocityPredictor:
         self.skip_on_ground = bool(settings["skip_on_ground"])
         self.skip_low_quality = bool(settings["skip_low_quality"])
         self.skip_stale = bool(settings["skip_stale"])
-        uncertainty = settings["uncertainty"]
-        self.base_position_error_m = float(uncertainty["base_position_error_m"])
-        self.speed_error_mps = float(uncertainty["speed_error_mps"])
-        self.age_error_m_per_s = float(uncertainty["age_error_m_per_s"])
+        self.uncertainty_settings = settings["uncertainty"]
 
     def _skip_reason(self, state: Mapping, age_s: float) -> str | None:
         if self.skip_on_ground and state.get("on_ground") is True:
@@ -91,8 +96,8 @@ class ConstantVelocityPredictor:
             longitude, latitude = self.inverse_transformer.transform(x_m, y_m)
             altitude_m = None if origin_altitude is None else max(
                 self.ground_elevation_m, origin_altitude + vertical_rate * t_s)
-            uncertainty_m = (self.base_position_error_m + self.speed_error_mps * t_s +
-                             self.age_error_m_per_s * age_s)
+            uncertainty_m = uncertainty_radius_m(horizon_s=t_s, age_s=age_s,
+                                                 settings={"uncertainty": self.uncertainty_settings})
             result["points"].append({"t_s": t_s, "x_m": x_m, "y_m": y_m,
                                      "latitude": latitude, "longitude": longitude,
                                      "altitude_m": altitude_m,

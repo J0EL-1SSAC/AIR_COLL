@@ -1,119 +1,155 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { createRoot } from 'react-dom/client';
-import { Circle, MapContainer, Marker, Polygon, Polyline, TileLayer, Tooltip, useMap } from 'react-leaflet';
-import L from 'leaflet';
+import React,{useEffect,useRef,useState} from 'react';
+import {createRoot} from 'react-dom/client';
 import 'leaflet/dist/leaflet.css';
 import './style.css';
+import {UI} from './config';
+import DashboardHeader from './components/DashboardHeader';
+import FiltersPanel from './components/FiltersPanel';
+import DetailsPanel from './components/DetailsPanel';
+import MapView from './components/MapView';
+import BottomPanel from './components/BottomPanel';
 
-const apiBase = import.meta.env.VITE_API_BASE || 'http://localhost:8000';
-const wsUrl = apiBase.replace(/^http/, 'ws') + '/ws/live';
-const fmt = (v, unit, digits=0) => v == null ? '—' : `${Number(v).toFixed(digits)} ${unit}`;
-function AircraftMarker({ aircraft, selected, onClick, bands }) {
-  const altitude = aircraft.baro_altitude_m;
-  const color = aircraft.on_ground ? '#f59e0b' : altitude == null ? '#94a3b8' : altitude < bands.low_max ? '#22c55e' : altitude < bands.medium_max ? '#38bdf8' : '#a78bfa';
-  const icon = useMemo(() => L.divIcon({ className: 'aircraft-icon-wrap', html: `<div class="plane" style="--plane-color:${color};--rotation:${aircraft.track_deg || 0}deg">➤</div>`, iconSize: [30,30], iconAnchor: [15,15] }), [color, aircraft.track_deg]);
-  return <Marker position={[aircraft.latitude, aircraft.longitude]} icon={icon} eventHandlers={{ click: onClick }}>
-    <Tooltip permanent direction="top" offset={[0,-8]}>{aircraft.callsign || aircraft.icao24}</Tooltip>
-  </Marker>;
-}
-function FitAirport({ center }) { const map = useMap(); useEffect(() => { map.setView(center, map.getZoom()); }, [center, map]); return null; }
-function App() {
-  const [airport, setAirport] = useState(null);
-  const [aircraft, setAircraft] = useState([]);
-  const [predictions, setPredictions] = useState({});
-  const [showPredictions, setShowPredictions] = useState(true);
-  const [predictionStatus, setPredictionStatus] = useState('');
-  const [selected, setSelected] = useState(null);
-  const [status, setStatus] = useState('CONNECTING');
-  const [mode, setMode] = useState('LIVE');
-  const [replaySpeed, setReplaySpeed] = useState(null);
-  const [replayBusy, setReplayBusy] = useState(false);
-  const [replayMessage, setReplayMessage] = useState('Replay uses only live-feed observations recorded in this application.');
-  const [message, setMessage] = useState('Connecting to live collector…');
-  const [counts, setCounts] = useState({aircraft_count:0, low_or_ground_count:0});
-  const [connected, setConnected] = useState(false);
-  const [ageTick, setAgeTick] = useState(0);
-  const [groundOnly, setGroundOnly] = useState(false);
-  const predictionRequest = useRef(0);
-  useEffect(() => { fetch(`${apiBase}/api/airport`).then(r=>r.ok?r.json():Promise.reject()).then(setAirport).catch(()=>{setStatus('DISCONNECTED');setMessage('Backend unavailable. No live data.');}); }, []);
-  useEffect(() => {
-    const timer = setInterval(() => { if (mode === 'LIVE') setAgeTick(t => t + (airport?.age_refresh_s || 1)); }, (airport?.age_refresh_s || 1) * 1000);
-    return () => clearInterval(timer);
-  }, [airport, mode]);
-  useEffect(() => {
-    let socket, retryTimer, stopped=false, delay=airport?.reconnect_initial_ms || 1000;
-    const connect = () => {
-      if (stopped) return;
-      socket = new WebSocket(wsUrl);
-      socket.onopen = () => { setConnected(true); delay=airport?.reconnect_initial_ms || 1000; };
-      socket.onmessage = event => { try { const m=JSON.parse(event.data); setMode(m.mode || 'LIVE'); setStatus(m.source_status); setMessage(m.data?.message || ''); setAircraft(m.data?.aircraft || []); setCounts(m.data || {}); setAgeTick(0); setSelected(current => current ? (m.data?.aircraft || []).find(a=>a.icao24===current.icao24) || null : null); } catch {} };
-      socket.onclose = () => { setConnected(false); setStatus('DISCONNECTED'); setMessage('Backend disconnected. Live aircraft cleared. Reconnecting…'); setAircraft([]); setSelected(null); retryTimer=setTimeout(connect, delay); delay=Math.min(delay*2, airport?.reconnect_max_ms || 15000); };
-      socket.onerror = () => socket.close();
+const apiBase=import.meta.env.VITE_API_BASE||'http://localhost:8000';
+const wsUrl=apiBase.replace(/^http/,'ws')+'/ws/live';
+const defaultLayers={trails:true,predictions:true,uncertainty:true,closestApproaches:true,radius:true};
+const storedBasemap=()=>{try{return localStorage.getItem('aircol-basemap')==='light'?'light':'dark';}catch{return 'dark';}};
+
+function App(){
+  const [airport,setAirport]=useState(null);
+  const [aircraft,setAircraft]=useState([]);
+  const [predictions,setPredictions]=useState({});
+  const [pairs,setPairs]=useState([]);
+  const [pairThresholds,setPairThresholds]=useState({near_nm:1.5,amber_nm:3});
+  const [status,setStatus]=useState('CONNECTING');
+  const [message,setMessage]=useState('Connecting to the live collector.');
+  const [mode,setMode]=useState('LIVE');
+  const [counts,setCounts]=useState({aircraft_count:0,low_or_ground_count:0});
+  const [selectedId,setSelectedId]=useState(null);
+  const [focusedPair,setFocusedPair]=useState(null);
+  const [mapLayers,setMapLayers]=useState(defaultLayers);
+  const [labelMode,setLabelMode]=useState('callsign');
+  const [basemap,setBasemap]=useState(storedBasemap);
+  const [mapNotice,setMapNotice]=useState('');
+  const [groundOnly,setGroundOnly]=useState(false);
+  const [leftCollapsed,setLeftCollapsed]=useState(false);
+  const [rightCollapsed,setRightCollapsed]=useState(false);
+  const [utcNow,setUtcNow]=useState('--:--:--');
+  const [lastReceivedAt,setLastReceivedAt]=useState(null);
+  const [ageNow,setAgeNow]=useState(Date.now());
+  const [predictionError,setPredictionError]=useState('');
+  const [pairsError,setPairsError]=useState('');
+  const [replaySpeed,setReplaySpeed]=useState(null);
+  const [replayBusy,setReplayBusy]=useState(false);
+  const [replayMessage,setReplayMessage]=useState('Replay uses only observations recorded from the live feed.');
+  const refreshSequence=useRef(0);
+
+  useEffect(()=>{
+    fetch(`${apiBase}/api/airport`).then(response=>response.ok?response.json():Promise.reject(new Error('Backend unavailable.')))
+      .then(data=>{setAirport(data);setPairThresholds(data.cpa_display||{near_nm:1.5,amber_nm:3});})
+      .catch(error=>{setStatus('DISCONNECTED');setMessage(`${error.message} No live data.`);});
+  },[]);
+
+  useEffect(()=>{
+    const timer=window.setInterval(()=>{const now=new Date();setUtcNow(now.toISOString().slice(11,19));setAgeNow(Date.now());},UI.updateAgeTickMs);
+    return()=>window.clearInterval(timer);
+  },[]);
+
+  useEffect(()=>{
+    if(!airport)return undefined;
+    let socket,retryTimer,stopped=false,delay=airport.reconnect_initial_ms||1000;
+    const connect=()=>{
+      if(stopped)return;
+      socket=new WebSocket(wsUrl);
+      socket.onopen=()=>{delay=airport.reconnect_initial_ms||1000;};
+      socket.onmessage=event=>{
+        try{
+          const payload=JSON.parse(event.data);
+          setMode(payload.mode||'LIVE');setStatus(payload.source_status||'NO_DATA');
+          setMessage(payload.data?.message||'No source status message.');
+          setAircraft(payload.data?.aircraft||[]);setCounts(payload.data||{});
+          setLastReceivedAt(Date.now());
+          setSelectedId(current=>current&&(payload.data?.aircraft||[]).some(a=>a.icao24===current)?current:null);
+        }catch{setMessage('Received an unreadable data update.');}
+      };
+      socket.onclose=()=>{
+        setStatus('DISCONNECTED');setMessage('Backend disconnected. No live data. Reconnecting…');
+        setAircraft([]);setPredictions({});setPairs([]);setSelectedId(null);setFocusedPair(null);setLastReceivedAt(null);
+        retryTimer=window.setTimeout(connect,delay);delay=Math.min(delay*2,airport.reconnect_max_ms||15000);
+      };
+      socket.onerror=()=>socket.close();
     };
     connect();
-    return () => { stopped=true; clearTimeout(retryTimer); socket?.close(); };
-  }, [airport]);
-  useEffect(() => {
-    if (!showPredictions || aircraft.length === 0) {
-      if (aircraft.length === 0) setPredictions({});
-      return;
-    }
-    const requestId = ++predictionRequest.current;
-    fetch(`${apiBase}/api/predictions`).then(response => {
-      if (!response.ok) throw new Error(`Prediction request failed (HTTP ${response.status}).`);
-      return response.json();
-    }).then(result => {
-      if (predictionRequest.current !== requestId || result.mode !== mode) return;
-      setPredictions(Object.fromEntries(result.predictions.map(item => [item.icao24, item])));
-      setPredictionStatus('');
-    }).catch(error => {
-      if (predictionRequest.current === requestId) {
-        setPredictions({});
-        setPredictionStatus(error.message);
-      }
+    return()=>{stopped=true;window.clearTimeout(retryTimer);socket?.close();};
+  },[airport]);
+
+  useEffect(()=>{
+    if(!airport)return undefined;
+    const sequence=++refreshSequence.current;
+    Promise.all([
+      fetch(`${apiBase}/api/predictions`).then(response=>response.ok?response.json():Promise.reject(new Error(`Prediction request failed (${response.status}).`))),
+      fetch(`${apiBase}/api/pairs`).then(response=>response.ok?response.json():Promise.reject(new Error(`Closest-approach request failed (${response.status}).`))),
+    ]).then(([predictionData,pairData])=>{
+      if(sequence!==refreshSequence.current)return;
+      if(predictionData.mode===mode){setPredictions(Object.fromEntries(predictionData.predictions.map(item=>[item.icao24,item])));setPredictionError('');}
+      if(pairData.mode===mode){setPairs(pairData.pairs);setPairsError('');}
+    }).catch(error=>{
+      if(sequence===refreshSequence.current){setPredictionError(error.message);setPairsError(error.message);}
     });
-    return () => { predictionRequest.current += 1; };
-  }, [aircraft, mode, showPredictions]);
-  if (!airport) return <main className="loading"><h1>AIR_COL</h1><p>{message}</p><p className="disclaimer">Research and educational prototype only. Public ADS-B data can be delayed or incomplete, with poor low-altitude and ground coverage. Not for operational safety decisions.</p></main>;
-  const fresh = aircraft.map(a=>({...a, age_s:a.age_s+ageTick})).filter(a=>a.age_s <= airport.stale_after_s);
-  const visible = groundOnly ? fresh.filter(a=>a.on_ground) : fresh;
-  const selectedFresh = selected ? fresh.find(a=>a.icao24===selected.icao24) : null;
-  const prediction = selectedFresh ? predictions[selectedFresh.icao24] : null;
-  const predictedCount = Object.values(predictions).filter(p=>p.status==='PREDICTED').length;
-  const skippedCount = Object.values(predictions).filter(p=>p.status==='SKIPPED').length;
-  const lowBandFt = airport.altitude_bands_m.low_max * 3.280839895;
-  const mediumBandFt = airport.altitude_bands_m.medium_max * 3.280839895;
-  const center = [airport.latitude, airport.longitude];
-  const ring = airport.radius_ring.map(([lon,lat])=>[lat,lon]);
-  const colors = {OK:'green', DEGRADED:'amber', NO_DATA:'red', DISCONNECTED:'red', CONNECTING:'amber'};
-  const speedOptions = [...new Set([...airport.replay.speed_steps, airport.replay.default_speed, airport.replay.min_speed, airport.replay.max_speed].filter(v=>v>=airport.replay.min_speed && v<=airport.replay.max_speed))].sort((a,b)=>a-b);
-  const selectedSpeed = replaySpeed ?? airport.replay.default_speed;
-  async function startReplay() {
-    setReplayBusy(true);
-    try {
-      const response = await fetch(`${apiBase}/api/replay/start`, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({speed:Number(selectedSpeed)})});
-      const body = await response.json();
-      if (!response.ok) throw new Error(body.detail || `Replay could not start (HTTP ${response.status}).`);
-      setReplayMessage(`Replaying ${body.cycles} recorded poll cycles at ${body.speed}×.`);
-    } catch (error) { setReplayMessage(`Replay unavailable: ${error.message}`); }
-    finally { setReplayBusy(false); }
+    return()=>{refreshSequence.current+=1;};
+  },[airport,aircraft,mode]);
+
+  const selectedAircraftRaw=selectedId?aircraft.find(item=>item.icao24===selectedId)||null:null;
+  const selectedAircraft=selectedAircraftRaw?{...selectedAircraftRaw,age_s:selectedAircraftRaw.age_s+(mode==='LIVE'&&lastReceivedAt!=null?(ageNow-lastReceivedAt)/1000:0)}:null;
+  const visibleAircraft=groundOnly?aircraft.filter(item=>item.on_ground===true):aircraft;
+  const predictionCounts={predicted:Object.values(predictions).filter(item=>item.status==='PREDICTED').length,
+    skipped:Object.values(predictions).filter(item=>item.status==='SKIPPED').length};
+  const lastUpdateAge=lastReceivedAt==null?null:Math.max(0,Math.floor((ageNow-lastReceivedAt)/1000));
+
+  function updateLayer(name,value){setMapLayers(current=>({...current,[name]:value}));}
+  function changeBasemap(value){setBasemap(value);setMapNotice('');try{localStorage.setItem('aircol-basemap',value);}catch{}}
+  function tileFailure(){
+    if(basemap==='dark'){
+      setBasemap('light');setMapNotice('Dark tiles could not load. Switched to OpenStreetMap light tiles.');
+      try{localStorage.setItem('aircol-basemap','light');}catch{}
+    }
   }
-  async function stopReplay() {
+  async function startReplay(){
     setReplayBusy(true);
-    try { const response=await fetch(`${apiBase}/api/replay/stop`, {method:'POST'}); if(!response.ok) throw new Error('Replay stop failed.'); setReplayMessage('Replay stopped; showing the live collector.'); }
-    catch(error) { setReplayMessage(error.message); }
-    finally { setReplayBusy(false); }
+    try{
+      const response=await fetch(`${apiBase}/api/replay/start`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({speed:Number(replaySpeed??airport.replay.default_speed)})});
+      const body=await response.json();if(!response.ok)throw new Error(body.detail||`Replay request failed (${response.status}).`);
+      setReplayMessage(`Replaying ${body.cycles} recorded polls at ${body.speed}×.`);
+    }catch(error){setReplayMessage(`Replay unavailable: ${error.message}`);}
+    finally{setReplayBusy(false);}
   }
-  return <div className="app">
-    <header><div><h1>AIR_COL <span>{mode} RESEARCH</span></h1><p>{airport.icao} · {airport.radius_nm} NM monitoring radius</p></div><div className={`status ${colors[status] || 'amber'}`}><i/>{mode} · {status.replace('_',' ')} · {message}</div></header>
-    <div className="workspace">
-      <aside className="left panel"><h2>Filters</h2><label><input type="checkbox" checked={groundOnly} onChange={e=>setGroundOnly(e.target.checked)}/> On-ground only</label><label><input type="checkbox" checked={showPredictions} onChange={e=>setShowPredictions(e.target.checked)}/> Show trajectory predictions</label><div className="legend"><h3>Aircraft bands</h3><p><b className="dot amberdot"/> On ground</p><p><b className="dot greendot"/> Below {Math.round(lowBandFt).toLocaleString()} ft</p><p><b className="dot bluedot"/> {Math.round(lowBandFt).toLocaleString()}–{Math.round(mediumBandFt).toLocaleString()} ft</p><p><b className="dot purpledot"/> Above {Math.round(mediumBandFt).toLocaleString()} ft</p></div><div className="coverage"><b>{counts.aircraft_count || 0}</b><span> aircraft observed</span><p>{counts.low_or_ground_count || 0} below 1,000 ft / on ground</p>{showPredictions && <p>{predictedCount} paths · {skippedCount} skipped</p>}{predictionStatus && <p className="prediction-error">{predictionStatus}</p>}</div></aside>
-      <section className="map-area"><MapContainer center={center} zoom={airport.map_zoom} scrollWheelZoom className="map"><FitAirport center={center}/><TileLayer attribution='&copy; OpenStreetMap contributors' url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"/><Polygon positions={ring} pathOptions={{color:'#42d6c5',weight:2,fillOpacity:0.035,dashArray:'7 7'}}/><Marker position={center}><Tooltip permanent>{airport.icao}</Tooltip></Marker>{visible.map(a=>{const prediction=showPredictions?predictions[a.icao24]:null;const points=prediction?.status==='PREDICTED'?prediction.points:[];const origin=prediction?.origin;return <React.Fragment key={a.icao24}>{points.length>0 && <>{origin && <Polyline positions={[[a.latitude,a.longitude],[origin.latitude,origin.longitude]]} pathOptions={{color:'#b9a46d',weight:1,dashArray:'2 5',opacity:.7}}/>}<Polyline positions={[[origin.latitude,origin.longitude],...points.map(p=>[p.latitude,p.longitude])]} pathOptions={{color:'#ffda79',weight:2,dashArray:'5 6',opacity:.9}}/>{points.map(p=><Circle key={`${a.icao24}-${p.t_s}`} center={[p.latitude,p.longitude]} radius={p.uncertainty_radius_m} pathOptions={{color:'#ffda79',weight:1,fillColor:'#ffda79',fillOpacity:.08}}><Tooltip permanent direction="top" className="prediction-tick">+{p.t_s}s</Tooltip></Circle>)}</>}{a.history.length > 1 && <Polyline positions={a.history.map(p=>[p.latitude,p.longitude])} pathOptions={{color:'#e5f4ff',weight:2,opacity:.55}}/>}<AircraftMarker aircraft={a} selected={selected?.icao24===a.icao24} bands={airport.altitude_bands_m} onClick={()=>setSelected(a)}/></React.Fragment>})}</MapContainer><div className="map-caption">{mode} positions and trails · dashed paths show constant-velocity predictions</div></section>
-      <aside className="right panel"><h2>Aircraft details</h2>{selectedFresh ? <><div className="callsign">{selectedFresh.callsign || 'Unknown callsign'}</div><div className="icao">{selectedFresh.icao24}</div><dl><dt>Altitude</dt><dd>{fmt(selectedFresh.altitude_ft,'ft')}</dd><dt>Speed</dt><dd>{fmt(selectedFresh.speed_kt,'kt')}</dd><dt>Heading</dt><dd>{fmt(selectedFresh.track_deg,'°')}</dd><dt>Vertical rate</dt><dd>{fmt(selectedFresh.vertical_rate_mps == null ? null : selectedFresh.vertical_rate_mps*196.8504,'ft/min')}</dd><dt>On ground</dt><dd>{selectedFresh.on_ground ? 'Yes' : 'No'}</dd><dt>Data age</dt><dd>{fmt(selectedFresh.age_s,'s',1)}</dd><dt>Distance</dt><dd>{fmt(selectedFresh.distance_nm,'NM',1)}</dd>{showPredictions && <><dt>Prediction</dt><dd>{prediction?.status==='SKIPPED'?`Skipped: ${prediction.reason_code}`:prediction?.status==='PREDICTED'?'Available':'Loading'}</dd>{prediction?.status==='PREDICTED' && <><dt>Final uncertainty</dt><dd>{fmt(prediction.points.at(-1)?.uncertainty_radius_m,'m')}</dd></>}</>}</dl></> : <p className="muted">Select an aircraft marker to inspect its reported state.</p>}</aside>
+  async function stopReplay(){
+    setReplayBusy(true);
+    try{const response=await fetch(`${apiBase}/api/replay/stop`,{method:'POST'});if(!response.ok)throw new Error('Replay stop request failed.');setReplayMessage('Replay stopped. Showing the live collector.');}
+    catch(error){setReplayMessage(error.message);}
+    finally{setReplayBusy(false);}
+  }
+  function focusPair(pair){setFocusedPair(pair);setSelectedId(pair.aircraft_a.icao24);}
+
+  if(!airport)return <main className="loading-screen"><h1>AIR_COL</h1><div className="skeleton"/><div className="skeleton"/><p>{message}</p>
+    <p className="disclaimer">Research prototype. Not ATC, TCAS/ACAS or a certified safety system. Public ADS-B may be delayed, incomplete or inaccurate, especially at low altitude and on the ground.</p></main>;
+
+  const workspaceClass=['workspace',leftCollapsed?'left-hidden':'',rightCollapsed?'right-hidden':'',leftCollapsed&&rightCollapsed?'both-hidden':''].filter(Boolean).join(' ');
+  const replay={speed:replaySpeed??airport.replay.default_speed,onSpeed:setReplaySpeed,onStart:startReplay,onStop:stopReplay,busy:replayBusy,mode,message:replayMessage};
+  return <main className="app-shell">
+    <DashboardHeader airport={airport} mode={mode} status={status} message={message} utcNow={utcNow}
+      lastUpdateAge={lastUpdateAge} onToggleLeft={()=>setLeftCollapsed(value=>!value)} onToggleRight={()=>setRightCollapsed(value=>!value)}/>
+    <div className={workspaceClass}>
+      {!leftCollapsed&&<FiltersPanel airport={airport} counts={counts} predictionCounts={predictionCounts} mapLayers={mapLayers}
+        onLayerChange={updateLayer} labelMode={labelMode} onLabelMode={setLabelMode} basemap={basemap} onBasemap={changeBasemap}
+        groundOnly={groundOnly} onGroundOnly={setGroundOnly}/>}
+      <MapView airport={airport} aircraft={visibleAircraft} predictions={predictions} pairs={pairs}
+        selectedId={selectedId} onSelect={state=>setSelectedId(state.icao24)} focusPair={focusedPair}
+        onFocusPair={focusPair} layers={mapLayers} labelMode={labelMode} basemap={basemap} onTileFailure={tileFailure} mapNotice={mapNotice}/>
+      {!rightCollapsed&&<DetailsPanel aircraft={selectedAircraft} prediction={selectedAircraft?predictions[selectedAircraft.icao24]:null}/>}
     </div>
-    <section className="timeline panel"><h2>Recorded data replay</h2><div className="replay-controls"><label>Speed <select value={selectedSpeed} onChange={e=>setReplaySpeed(Number(e.target.value))}>{speedOptions.map(speed=><option key={speed} value={speed}>{speed}×</option>)}</select></label><button disabled={replayBusy || mode==='REPLAY'} onClick={startReplay}>Replay recorded feed</button><button disabled={replayBusy || mode!=='REPLAY'} onClick={stopReplay}>Stop replay</button><span>{replayMessage}</span></div></section>
-    <footer className="disclaimer">Research and educational prototype only. Public ADS-B data may be delayed, omit aircraft, and have poor low-altitude or ground coverage. This is not ATC, TCAS/ACAS, or a certified runway-safety system.</footer>
-  </div>;
+    <BottomPanel pairs={pairs} thresholds={pairThresholds} replaySettings={airport.replay} replay={replay} onFocusPair={focusPair}/>
+    <footer className="disclaimer">Research prototype. Not ATC, TCAS/ACAS or a certified safety system. Public ADS-B data can be delayed, incomplete or inaccurate, especially at low altitude and on the ground.{pairsError&&<span> · Pair data unavailable.</span>}{predictionError&&<span> · Prediction data unavailable.</span>}</footer>
+  </main>;
 }
 
 createRoot(document.getElementById('root')).render(<App/>);

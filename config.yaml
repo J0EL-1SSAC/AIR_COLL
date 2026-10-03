@@ -55,6 +55,18 @@ prediction:
     speed_error_mps: 1.5
     age_error_m_per_s: 0.5
 
+cpa:
+  lookahead_s: 60
+  horizontal_cutoff_nm: 12
+  altitude_band_ft: 5000
+  relative_speed_epsilon_mps: 0.1
+  position_epsilon_m: 0.01
+  altitude_basis_policy: common_geometric_then_barometric
+  minimum_data_quality: not_low_quality
+  uncertainty_combination: root_sum_square
+  display_near_nm: 1.5
+  display_amber_nm: 3.0
+
 api:
   cors_origins:
     - http://localhost:5173
@@ -70,3 +82,7 @@ web:
   age_refresh_s: 1
   reconnect_initial_ms: 1000
   reconnect_max_ms: 15000
+  labels_min_zoom: 11
+  prediction_ticks_min_zoom: 11
+  trail_oldest_opacity: 0.18
+  trail_newest_opacity: 0.82
