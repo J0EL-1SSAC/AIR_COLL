@@ -42,6 +42,19 @@ replay:
   speed_steps: [1, 5, 10, 30, 60]
   queue_size: 1
 
+prediction:
+  model: constant_velocity
+  horizons_s: [5, 10, 20, 30, 60]
+  ground_elevation_m: 16.4592
+  max_data_age_s: 45
+  skip_on_ground: true
+  skip_low_quality: true
+  skip_stale: true
+  uncertainty:
+    base_position_error_m: 30
+    speed_error_mps: 1.5
+    age_error_m_per_s: 0.5
+
 api:
   cors_origins:
     - http://localhost:5173

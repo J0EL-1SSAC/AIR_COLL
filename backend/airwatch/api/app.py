@@ -46,7 +46,8 @@ def make_collector(recorder, *, clock=None, mode="LIVE", source=None, on_publish
                          low_altitude_ft=float(c["low_altitude_ft"]), manager_config=CONFIG["state_manager"],
                          recorder=recorder, daily_credit_quota=float(CONFIG["opensky"]["daily_credit_quota"]),
                          estimated_credits_per_request=float(CONFIG["opensky"]["estimated_credits_per_states_request"]),
-                         clock=clock, mode=mode, record_live=(mode == "LIVE"), on_publish=on_publish)
+                         clock=clock, mode=mode, record_live=(mode == "LIVE"), on_publish=on_publish,
+                         prediction_config=CONFIG["prediction"])
 
 
 def push_active(collector, message):
@@ -169,6 +170,33 @@ async def airport():
 @app.get("/api/aircraft")
 async def aircraft():
     return app.state.active_collector.envelope("snapshot")
+
+
+def current_predictions(collector):
+    now = collector.clock.now()
+    collector.manager.expire(now)
+    states = collector.manager.snapshot(now, include_unpositioned=True)
+    settings = CONFIG["prediction"]
+    horizons = settings["horizons_s"]
+    predictions = [collector.predictor.predict(state, horizons) for state in states]
+    return {"mode": collector.mode, "updated_at": collector.clock.isoformat(),
+            "model": settings["model"], "horizons_s": horizons, "predictions": predictions}
+
+
+@app.get("/api/predictions")
+async def predictions():
+    return current_predictions(app.state.active_collector)
+
+
+@app.get("/api/aircraft/{icao24}/prediction")
+async def aircraft_prediction(icao24: str):
+    collector = app.state.active_collector
+    result = current_predictions(collector)
+    prediction = next((item for item in result["predictions"] if item["icao24"].lower() == icao24.lower()), None)
+    if prediction is None:
+        raise HTTPException(404, "Aircraft is not currently active in the selected pipeline.")
+    return {"mode": result["mode"], "updated_at": result["updated_at"], "model": result["model"],
+            "horizons_s": result["horizons_s"], "prediction": prediction}
 
 
 @app.get("/api/coverage")

@@ -1,6 +1,6 @@
-# AIR_COL project state — Phase 4
+# AIR_COL project state — Phase 5
 
-Research/educational live ADS-B prototype for one configured airport. It is not ATC, TCAS/ACAS, or a certified safety system. Live aircraft data comes from OpenSky; replay reads only the app's recorded OpenSky rows. Feed errors and empty responses remain visibly degraded/no-data; the app has no synthetic aircraft fallback.
+Research and education prototype for live ADS-B around one configured airport. It is not ATC, TCAS/ACAS, or a certified safety system. The application uses live OpenSky data and replays only observations that it recorded; unavailable or empty feeds produce degraded/no-data status, never synthetic aircraft.
 
 ## Folder tree
 
@@ -11,53 +11,50 @@ AIR_COL/
 ├── config.yaml
 ├── requirements.txt
 ├── backend/airwatch/
+│   ├── api/{__init__.py,app.py}
 │   ├── cli.py
 │   ├── clock.py
 │   ├── collector.py
 │   ├── models.py
 │   ├── opensky.py
+│   ├── prediction.py
 │   ├── replay.py
 │   ├── state_manager.py
-│   ├── storage.py
-│   └── api/{__init__.py,app.py}
+│   └── storage.py
 ├── frontend/{index.html,package.json,package-lock.json,src/main.jsx,src/style.css}
-├── tests/{test_config.py,test_enu_frame.py,test_opensky_limits.py,test_replay.py,test_state_manager.py,test_storage.py}
+├── tests/{test_config.py,test_enu_frame.py,test_opensky_limits.py,test_prediction.py,test_replay.py,test_state_manager.py,test_storage.py}
 └── docs/PROJECT_STATE.md
 ```
 
 ## Install and run
 
-From the project root, activate `.venv` (Python 3.11+), install `python -m pip install -r requirements.txt`, and export `OPENSKY_CLIENT_ID` and `OPENSKY_CLIENT_SECRET` in the shell. Create OpenSky OAuth client credentials in the OpenSky account portal's API client/credentials area; use the client ID and client secret values as the two environment variables. Never put credentials in YAML or commit them.
+From the project root, activate `.venv` (Python 3.11+), install `python -m pip install -r requirements.txt`, and export `OPENSKY_CLIENT_ID` and `OPENSKY_CLIENT_SECRET`. Create OAuth client credentials in the OpenSky account's API credentials area. Keep both values in environment variables; do not put secrets in YAML or commit them.
 
-Start the backend with `.venv/bin/uvicorn backend.airwatch.api.app:app --reload --reload-dir backend`. Start the React dashboard in a second terminal with `cd frontend && npm install && npm run dev`. The live-only CLI still works with `python -m backend.airwatch.cli --once`; without credentials it reports `DEGRADED` and `NO DATA`, without inventing records. Continuous CLI mode records live polls until stopped.
+Start the API with `.venv/bin/uvicorn backend.airwatch.api.app:app --reload --reload-dir backend`. Start the UI in a second terminal with `cd frontend && npm install && npm run dev`. The live CLI remains `python -m backend.airwatch.cli --once` or continuous without `--once`; both use only the live source. Missing credentials produce `DEGRADED` / `NO DATA`.
 
-Run tests with `.venv/bin/python -m pytest -q`; build the UI with `npm --prefix frontend run build`.
+Tests: `.venv/bin/python -m pytest -q`. Frontend build: `npm --prefix frontend run build`.
 
 ## API and WebSocket contracts
 
-- `GET /api/health`: `{mode, status, updated_at, message}`. `mode` is `LIVE` or `REPLAY`.
-- `GET /api/airport`: configured center/radius, map settings, altitude bands and replay speed settings.
-- `GET /api/aircraft`: selected pipeline snapshot, including `mode` at the envelope top level.
-- `GET /api/coverage`: recorded live coverage buckets; replay does not write to this dataset.
-- `GET /api/replay/status`: selected mode and replay cycle progress.
-- `POST /api/replay/start`: optional JSON `{start_time, end_time, speed}` where times are UTC Unix seconds. Omitting bounds replays all locally recorded OpenSky poll cycles. Speed defaults to `replay.default_speed` and is limited by configured min/max. Returns 404 if no recorded cycles match.
-- `POST /api/replay/stop`: stops replay and switches the dashboard back to the continuing live collector.
-- `/ws/live`: `{type, mode, ts, source_status, data}`. During replay, only replay snapshots/status are delivered. On start/end, connected clients receive the selected mode's snapshot.
+- `GET /api/health`: `{mode, status, updated_at, message}`, with mode `LIVE` or `REPLAY`.
+- `GET /api/airport`: configured airport/radius, map settings, replay and prediction settings.
+- `GET /api/aircraft`: currently selected pipeline snapshot and mode.
+- `GET /api/predictions`: batch constant-velocity trajectories or explicit per-aircraft skip reason codes, plus mode/model/horizons.
+- `GET /api/aircraft/{icao24}/prediction`: one current aircraft's prediction; 404 if no longer active.
+- `GET /api/coverage`: recorded live-feed coverage buckets.
+- Replay controls: `GET /api/replay/status`, `POST /api/replay/start` with optional `{start_time,end_time,speed}` (Unix seconds), and `POST /api/replay/stop`.
+- `/ws/live`: `{type, mode, ts, source_status, data}`. Predictions are intentionally fetched through the batch REST endpoint to keep WebSocket snapshots compact.
 
-The replay adapter implements the same `DataSource.fetch_states(center, radius_nm)` interface as the OpenSky adapter. It iterates `coverage_samples` poll times and loads exact matching `raw_states` rows marked `opensky`; it retains empty poll cycles and rechecks the configured geodesic radius. It never writes observations. `ReplayClock` advances at the recorded UTC source timestamps; `LiveClock` drives live collector age, staleness and polling. The live collector and its recorder continue running while replay data is displayed.
+Prediction inputs are age-compensated ENU positions from the active state manager and velocity components computed with `vx=speed*sin(track)`, `vy=speed*cos(track)` for true track clockwise from north. `ConstantVelocityPredictor` is selected by config and implements the `Predictor` protocol. It returns ENU and latitude/longitude at configured horizons, vertical estimates clamped to configured airport elevation, uncertainty radii, or a reason code when prediction is skipped. The same injected LIVE/REPLAY clock computes report age. The forward and inverse pyproj transforms use x=east, y=north internally and return longitude/latitude in API order.
 
 ## Configuration
 
-`config.yaml` contains airport identity/coordinates/radius, OpenSky OAuth/API endpoints and timeout/quota estimates, collector poll/backoff/sparsity thresholds, manager history/staleness/smoothing, SQLite path/batch/flush, coverage window/bucket, replay speed range/steps/queue, API CORS, and web map/display settings. `AIR_COL_CONFIG` selects an alternate YAML file. Secrets remain in environment variables.
+`config.yaml` holds airport identity/coordinates/radius; OpenSky endpoints, timeout, and quota; collector polling/backoff; state-manager history, quality and staleness; database path/batching; coverage; replay speed; prediction model, horizons, skip rules, ground elevation, and uncertainty terms; API CORS; and web display settings. Secrets are environment-only. VOMM ground elevation is set to 16.4592 m (54 ft) from the Airports Authority of India eAIP; verify the current value against official charts before research use. No dependency was added for Phase 5.
 
 ## Database
 
-`data/airwatch.db` uses SQLite WAL. `raw_states` stores every returned live OpenSky state row and source timestamp; `coverage_samples` stores successful poll summaries, including empty responses. `data/*.db` and SQLite sidecar files are ignored by Git. Replay reads those existing tables only; no replay event or state writes occur in this phase.
-
-## Recorded data available when Phase 4 was implemented
-
-At the latest check, the database contained 263 `raw_states` rows across 56 coverage cycles, 12 distinct aircraft, from `2026-10-03T10:12:24.461015+00:00` to `2026-10-03T10:34:17.208908+00:00` (about 22 minutes). This is enough to exercise the replay controls and source, but not to assess traffic patterns or sparse coverage. Record several hours spanning busy and quiet periods before drawing research conclusions.
+`data/airwatch.db` uses SQLite WAL. `raw_states` stores live OpenSky observations; `coverage_samples` stores successful poll summaries, including empty polls. Replay reads those recorded rows only and does not write replayed data. `data/*.db` and SQLite sidecars are ignored by Git. Predictions are computed from active in-memory LIVE or REPLAY state and are not persisted.
 
 ## Known limitations
 
-Replay bounds are supplied as Unix seconds through the API; the dashboard currently replays the full locally recorded range and offers playback-speed selection. Replay has independent in-memory state and does not write replayed states into `raw_states`. The frontend does not label imported external history because importing is not implemented. Public ADS-B can be delayed, omit aircraft, and have poor low-altitude/ground coverage. Coverage counts describe only received public feed data. This remains a research prototype and does not generate or confirm conflict/runway events.
+Prediction uses straight constant velocity and heading: it does not model turns, wind, pilot intent, or calibrated uncertainty. Geographic/pressure altitude may be missing or differ in datum; geometric altitude is preferred, with barometric altitude as fallback. Ground elevation is an airport-level clamp, not local terrain/runway elevation. Stale, low-quality, on-ground, or incomplete states return explicit skip codes. Public ADS-B may be delayed, omit aircraft, and have poor low-altitude/ground coverage. All results are research estimates and cannot confirm conflict or runway events.

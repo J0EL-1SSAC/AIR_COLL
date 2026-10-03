@@ -7,6 +7,7 @@ from typing import Any
 from pyproj import Transformer
 
 from .models import AircraftState
+from .prediction import track_to_velocity_components
 
 _M_TO_FT = 3.280839895
 _MPS_TO_KT = 1.943844492
@@ -32,8 +33,7 @@ class AircraftStateManager:
     def _raw_velocity(state: AircraftState) -> tuple[float | None, float | None]:
         if state.velocity_mps is None or state.track_deg is None:
             return None, None
-        angle = math.radians(state.track_deg)
-        return state.velocity_mps * math.sin(angle), state.velocity_mps * math.cos(angle)
+        return track_to_velocity_components(state.velocity_mps, state.track_deg)
 
     def _position(self, state: AircraftState) -> tuple[float, float] | None:
         if state.latitude is None or state.longitude is None:
@@ -127,11 +127,11 @@ class AircraftStateManager:
                 "distance_nm": None if x_m is None or y_m is None else math.hypot(x_m, y_m) / _NM_TO_M,
                 "quality_flags": flags, "history": list(self.histories.get(key, ())) }
 
-    def snapshot(self, now: float) -> list[dict]:
+    def snapshot(self, now: float, *, include_unpositioned: bool = False) -> list[dict]:
         result = []
         for key, entry in self.states.items():
             view = self._serialize(key, entry, now)
-            if view["latitude"] is not None and view["longitude"] is not None:
+            if include_unpositioned or (view["latitude"] is not None and view["longitude"] is not None):
                 result.append(view)
         return result
 

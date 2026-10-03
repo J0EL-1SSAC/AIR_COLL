@@ -1,6 +1,6 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { MapContainer, Marker, Polygon, Polyline, TileLayer, Tooltip, useMap } from 'react-leaflet';
+import { Circle, MapContainer, Marker, Polygon, Polyline, TileLayer, Tooltip, useMap } from 'react-leaflet';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 import './style.css';
@@ -20,6 +20,9 @@ function FitAirport({ center }) { const map = useMap(); useEffect(() => { map.se
 function App() {
   const [airport, setAirport] = useState(null);
   const [aircraft, setAircraft] = useState([]);
+  const [predictions, setPredictions] = useState({});
+  const [showPredictions, setShowPredictions] = useState(true);
+  const [predictionStatus, setPredictionStatus] = useState('');
   const [selected, setSelected] = useState(null);
   const [status, setStatus] = useState('CONNECTING');
   const [mode, setMode] = useState('LIVE');
@@ -31,6 +34,7 @@ function App() {
   const [connected, setConnected] = useState(false);
   const [ageTick, setAgeTick] = useState(0);
   const [groundOnly, setGroundOnly] = useState(false);
+  const predictionRequest = useRef(0);
   useEffect(() => { fetch(`${apiBase}/api/airport`).then(r=>r.ok?r.json():Promise.reject()).then(setAirport).catch(()=>{setStatus('DISCONNECTED');setMessage('Backend unavailable. No live data.');}); }, []);
   useEffect(() => {
     const timer = setInterval(() => { if (mode === 'LIVE') setAgeTick(t => t + (airport?.age_refresh_s || 1)); }, (airport?.age_refresh_s || 1) * 1000);
@@ -49,10 +53,34 @@ function App() {
     connect();
     return () => { stopped=true; clearTimeout(retryTimer); socket?.close(); };
   }, [airport]);
+  useEffect(() => {
+    if (!showPredictions || aircraft.length === 0) {
+      if (aircraft.length === 0) setPredictions({});
+      return;
+    }
+    const requestId = ++predictionRequest.current;
+    fetch(`${apiBase}/api/predictions`).then(response => {
+      if (!response.ok) throw new Error(`Prediction request failed (HTTP ${response.status}).`);
+      return response.json();
+    }).then(result => {
+      if (predictionRequest.current !== requestId || result.mode !== mode) return;
+      setPredictions(Object.fromEntries(result.predictions.map(item => [item.icao24, item])));
+      setPredictionStatus('');
+    }).catch(error => {
+      if (predictionRequest.current === requestId) {
+        setPredictions({});
+        setPredictionStatus(error.message);
+      }
+    });
+    return () => { predictionRequest.current += 1; };
+  }, [aircraft, mode, showPredictions]);
   if (!airport) return <main className="loading"><h1>AIR_COL</h1><p>{message}</p><p className="disclaimer">Research and educational prototype only. Public ADS-B data can be delayed or incomplete, with poor low-altitude and ground coverage. Not for operational safety decisions.</p></main>;
   const fresh = aircraft.map(a=>({...a, age_s:a.age_s+ageTick})).filter(a=>a.age_s <= airport.stale_after_s);
   const visible = groundOnly ? fresh.filter(a=>a.on_ground) : fresh;
   const selectedFresh = selected ? fresh.find(a=>a.icao24===selected.icao24) : null;
+  const prediction = selectedFresh ? predictions[selectedFresh.icao24] : null;
+  const predictedCount = Object.values(predictions).filter(p=>p.status==='PREDICTED').length;
+  const skippedCount = Object.values(predictions).filter(p=>p.status==='SKIPPED').length;
   const lowBandFt = airport.altitude_bands_m.low_max * 3.280839895;
   const mediumBandFt = airport.altitude_bands_m.medium_max * 3.280839895;
   const center = [airport.latitude, airport.longitude];
@@ -79,9 +107,9 @@ function App() {
   return <div className="app">
     <header><div><h1>AIR_COL <span>{mode} RESEARCH</span></h1><p>{airport.icao} · {airport.radius_nm} NM monitoring radius</p></div><div className={`status ${colors[status] || 'amber'}`}><i/>{mode} · {status.replace('_',' ')} · {message}</div></header>
     <div className="workspace">
-      <aside className="left panel"><h2>Filters</h2><label><input type="checkbox" checked={groundOnly} onChange={e=>setGroundOnly(e.target.checked)}/> On-ground only</label><div className="legend"><h3>Aircraft bands</h3><p><b className="dot amberdot"/> On ground</p><p><b className="dot greendot"/> Below {Math.round(lowBandFt).toLocaleString()} ft</p><p><b className="dot bluedot"/> {Math.round(lowBandFt).toLocaleString()}–{Math.round(mediumBandFt).toLocaleString()} ft</p><p><b className="dot purpledot"/> Above {Math.round(mediumBandFt).toLocaleString()} ft</p></div><div className="coverage"><b>{counts.aircraft_count || 0}</b><span> aircraft observed</span><p>{counts.low_or_ground_count || 0} below 1,000 ft / on ground</p></div></aside>
-      <section className="map-area"><MapContainer center={center} zoom={airport.map_zoom} scrollWheelZoom className="map"><FitAirport center={center}/><TileLayer attribution='&copy; OpenStreetMap contributors' url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"/><Polygon positions={ring} pathOptions={{color:'#42d6c5',weight:2,fillOpacity:0.035,dashArray:'7 7'}}/><Marker position={center}><Tooltip permanent>{airport.icao}</Tooltip></Marker>{visible.map(a=><React.Fragment key={a.icao24}>{a.history.length > 1 && <Polyline positions={a.history.map(p=>[p.latitude,p.longitude])} pathOptions={{color:'#e5f4ff',weight:2,opacity:.55}}/>}<AircraftMarker aircraft={a} selected={selected?.icao24===a.icao24} bands={airport.altitude_bands_m} onClick={()=>setSelected(a)}/></React.Fragment>)}</MapContainer><div className="map-caption">{mode} positions and trails · recorded live-feed observations</div></section>
-      <aside className="right panel"><h2>Aircraft details</h2>{selectedFresh ? <><div className="callsign">{selectedFresh.callsign || 'Unknown callsign'}</div><div className="icao">{selectedFresh.icao24}</div><dl><dt>Altitude</dt><dd>{fmt(selectedFresh.altitude_ft,'ft')}</dd><dt>Speed</dt><dd>{fmt(selectedFresh.speed_kt,'kt')}</dd><dt>Heading</dt><dd>{fmt(selectedFresh.track_deg,'°')}</dd><dt>Vertical rate</dt><dd>{fmt(selectedFresh.vertical_rate_mps == null ? null : selectedFresh.vertical_rate_mps*196.8504,'ft/min')}</dd><dt>On ground</dt><dd>{selectedFresh.on_ground ? 'Yes' : 'No'}</dd><dt>Data age</dt><dd>{fmt(selectedFresh.age_s,'s',1)}</dd><dt>Distance</dt><dd>{fmt(selectedFresh.distance_nm,'NM',1)}</dd></dl></> : <p className="muted">Select an aircraft marker to inspect its reported state.</p>}</aside>
+      <aside className="left panel"><h2>Filters</h2><label><input type="checkbox" checked={groundOnly} onChange={e=>setGroundOnly(e.target.checked)}/> On-ground only</label><label><input type="checkbox" checked={showPredictions} onChange={e=>setShowPredictions(e.target.checked)}/> Show trajectory predictions</label><div className="legend"><h3>Aircraft bands</h3><p><b className="dot amberdot"/> On ground</p><p><b className="dot greendot"/> Below {Math.round(lowBandFt).toLocaleString()} ft</p><p><b className="dot bluedot"/> {Math.round(lowBandFt).toLocaleString()}–{Math.round(mediumBandFt).toLocaleString()} ft</p><p><b className="dot purpledot"/> Above {Math.round(mediumBandFt).toLocaleString()} ft</p></div><div className="coverage"><b>{counts.aircraft_count || 0}</b><span> aircraft observed</span><p>{counts.low_or_ground_count || 0} below 1,000 ft / on ground</p>{showPredictions && <p>{predictedCount} paths · {skippedCount} skipped</p>}{predictionStatus && <p className="prediction-error">{predictionStatus}</p>}</div></aside>
+      <section className="map-area"><MapContainer center={center} zoom={airport.map_zoom} scrollWheelZoom className="map"><FitAirport center={center}/><TileLayer attribution='&copy; OpenStreetMap contributors' url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"/><Polygon positions={ring} pathOptions={{color:'#42d6c5',weight:2,fillOpacity:0.035,dashArray:'7 7'}}/><Marker position={center}><Tooltip permanent>{airport.icao}</Tooltip></Marker>{visible.map(a=>{const prediction=showPredictions?predictions[a.icao24]:null;const points=prediction?.status==='PREDICTED'?prediction.points:[];const origin=prediction?.origin;return <React.Fragment key={a.icao24}>{points.length>0 && <>{origin && <Polyline positions={[[a.latitude,a.longitude],[origin.latitude,origin.longitude]]} pathOptions={{color:'#b9a46d',weight:1,dashArray:'2 5',opacity:.7}}/>}<Polyline positions={[[origin.latitude,origin.longitude],...points.map(p=>[p.latitude,p.longitude])]} pathOptions={{color:'#ffda79',weight:2,dashArray:'5 6',opacity:.9}}/>{points.map(p=><Circle key={`${a.icao24}-${p.t_s}`} center={[p.latitude,p.longitude]} radius={p.uncertainty_radius_m} pathOptions={{color:'#ffda79',weight:1,fillColor:'#ffda79',fillOpacity:.08}}><Tooltip permanent direction="top" className="prediction-tick">+{p.t_s}s</Tooltip></Circle>)}</>}{a.history.length > 1 && <Polyline positions={a.history.map(p=>[p.latitude,p.longitude])} pathOptions={{color:'#e5f4ff',weight:2,opacity:.55}}/>}<AircraftMarker aircraft={a} selected={selected?.icao24===a.icao24} bands={airport.altitude_bands_m} onClick={()=>setSelected(a)}/></React.Fragment>})}</MapContainer><div className="map-caption">{mode} positions and trails · dashed paths show constant-velocity predictions</div></section>
+      <aside className="right panel"><h2>Aircraft details</h2>{selectedFresh ? <><div className="callsign">{selectedFresh.callsign || 'Unknown callsign'}</div><div className="icao">{selectedFresh.icao24}</div><dl><dt>Altitude</dt><dd>{fmt(selectedFresh.altitude_ft,'ft')}</dd><dt>Speed</dt><dd>{fmt(selectedFresh.speed_kt,'kt')}</dd><dt>Heading</dt><dd>{fmt(selectedFresh.track_deg,'°')}</dd><dt>Vertical rate</dt><dd>{fmt(selectedFresh.vertical_rate_mps == null ? null : selectedFresh.vertical_rate_mps*196.8504,'ft/min')}</dd><dt>On ground</dt><dd>{selectedFresh.on_ground ? 'Yes' : 'No'}</dd><dt>Data age</dt><dd>{fmt(selectedFresh.age_s,'s',1)}</dd><dt>Distance</dt><dd>{fmt(selectedFresh.distance_nm,'NM',1)}</dd>{showPredictions && <><dt>Prediction</dt><dd>{prediction?.status==='SKIPPED'?`Skipped: ${prediction.reason_code}`:prediction?.status==='PREDICTED'?'Available':'Loading'}</dd>{prediction?.status==='PREDICTED' && <><dt>Final uncertainty</dt><dd>{fmt(prediction.points.at(-1)?.uncertainty_radius_m,'m')}</dd></>}</>}</dl></> : <p className="muted">Select an aircraft marker to inspect its reported state.</p>}</aside>
     </div>
     <section className="timeline panel"><h2>Recorded data replay</h2><div className="replay-controls"><label>Speed <select value={selectedSpeed} onChange={e=>setReplaySpeed(Number(e.target.value))}>{speedOptions.map(speed=><option key={speed} value={speed}>{speed}×</option>)}</select></label><button disabled={replayBusy || mode==='REPLAY'} onClick={startReplay}>Replay recorded feed</button><button disabled={replayBusy || mode!=='REPLAY'} onClick={stopReplay}>Stop replay</button><span>{replayMessage}</span></div></section>
     <footer className="disclaimer">Research and educational prototype only. Public ADS-B data may be delayed, omit aircraft, and have poor low-altitude or ground coverage. This is not ATC, TCAS/ACAS, or a certified runway-safety system.</footer>

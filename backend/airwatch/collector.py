@@ -9,6 +9,7 @@ from pyproj import Transformer
 from .models import AirportCenter
 from .clock import Clock, LiveClock
 from .opensky import DataSource
+from .prediction import Predictor, build_predictor
 from .state_manager import AircraftStateManager
 from .storage import SQLiteRecorder
 
@@ -42,7 +43,7 @@ class LiveCollector:
                  low_altitude_ft: float, manager_config: dict, recorder: SQLiteRecorder,
                  daily_credit_quota: float, estimated_credits_per_request: float,
                  clock: Clock | None = None, mode: str = "LIVE", record_live: bool = True,
-                 on_publish=None):
+                 on_publish=None, prediction_config: dict | None = None):
         self.source, self.center, self.radius_nm = source, center, radius_nm
         self.poll_interval_s, self.max_backoff_s = poll_interval_s, max_backoff_s
         log_daily_quota_warning(poll_interval_s, daily_credit_quota, estimated_credits_per_request)
@@ -58,6 +59,12 @@ class LiveCollector:
         self.low_or_ground_count = 0
         self._listeners: set[asyncio.Queue] = set()
         self._transform = Transformer.from_crs("EPSG:4326", f"+proj=aeqd +lat_0={center.latitude} +lon_0={center.longitude} +datum=WGS84 +units=m +no_defs", always_xy=True)
+        self.predictor: Predictor | None = None
+        if prediction_config is not None:
+            inverse = Transformer.from_crs(f"+proj=aeqd +lat_0={center.latitude} +lon_0={center.longitude} +datum=WGS84 +units=m +no_defs",
+                                           "EPSG:4326", always_xy=True)
+            self.predictor = build_predictor(model=str(prediction_config["model"]), clock=self.clock,
+                                             inverse_transformer=inverse, settings=prediction_config)
         self.recorder = recorder
         self.manager = AircraftStateManager(latitude=center.latitude, longitude=center.longitude,
             history_length=int(manager_config["history_length"]),
