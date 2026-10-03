@@ -5,7 +5,7 @@ airport:
   radius_nm: 40
 
 opensky:
-  token_url: https://auth.opensky-network.org/auth/realms/opensky/protocol/openid-connect/token
+  token_url: https://auth.opensky-network.org/auth/realms/opensky-network/protocol/openid-connect/token
   api_url: https://opensky-network.org/api/states/all
   request_timeout_s: 20
 
