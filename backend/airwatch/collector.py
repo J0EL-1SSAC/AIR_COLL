@@ -14,19 +14,41 @@ from .storage import SQLiteRecorder
 
 logger = logging.getLogger(__name__)
 _M_TO_FT = 3.280839895
+_SECONDS_PER_DAY = 24 * 60 * 60
+
+
+def log_daily_quota_warning(poll_interval_s: float, daily_credit_quota: float,
+                            estimated_credits_per_request: float) -> float:
+    if poll_interval_s <= 0:
+        raise ValueError("poll_interval_s must be positive")
+    estimated_daily_credits = (_SECONDS_PER_DAY / poll_interval_s) * estimated_credits_per_request
+    if estimated_daily_credits > daily_credit_quota:
+        logging.getLogger(__name__).warning(
+            "Configured poll interval may exceed OpenSky's daily credit quota: "
+            "about %.0f estimated credits/day versus configured quota %.0f. "
+            "Adjust the interval or verify actual credit cost and quota in your OpenSky account.",
+            estimated_daily_credits, daily_credit_quota)
+    else:
+        logging.getLogger(__name__).info(
+            "Estimated OpenSky usage: about %.0f credits/day of configured %.0f (estimate only).",
+            estimated_daily_credits, daily_credit_quota)
+    return estimated_daily_credits
 
 
 class LiveCollector:
     """Reusable live poller shared by the API and CLI; it never manufactures data."""
     def __init__(self, *, source: DataSource, center: AirportCenter, radius_nm: float,
                  poll_interval_s: float, max_backoff_s: float, sparse_count_threshold: int,
-                 low_altitude_ft: float, manager_config: dict, recorder: SQLiteRecorder):
+                 low_altitude_ft: float, manager_config: dict, recorder: SQLiteRecorder,
+                 daily_credit_quota: float, estimated_credits_per_request: float):
         self.source, self.center, self.radius_nm = source, center, radius_nm
         self.poll_interval_s, self.max_backoff_s = poll_interval_s, max_backoff_s
+        log_daily_quota_warning(poll_interval_s, daily_credit_quota, estimated_credits_per_request)
         self.sparse_count_threshold, self.low_altitude_m = sparse_count_threshold, low_altitude_ft / _M_TO_FT
         self.latest: list[dict[str, Any]] = []
         self.status = "NO_DATA"
         self.message = "Waiting for the first live OpenSky response."
+        self.retry_after_s: float | None = None
         self.updated_at: str | None = None
         self.aircraft_count = 0
         self.low_or_ground_count = 0
@@ -75,6 +97,7 @@ class LiveCollector:
             states = await self.source.fetch_states(self.center, self.radius_nm)
         except Exception as exc:
             logger.warning("OpenSky degraded: %s", exc)
+            self.retry_after_s = getattr(exc, "retry_after_s", None)
             now = datetime.now(timezone.utc).timestamp()
             self.manager.expire(now)
             self.latest = self.manager.snapshot(now)
@@ -85,6 +108,7 @@ class LiveCollector:
             self._publish("status")
             return False
         now = datetime.now(timezone.utc).timestamp()
+        self.retry_after_s = None
         await self.recorder.record_batch(states, now, "opensky")
         self.manager.update(states, now)
         self.latest = self.manager.snapshot(now)
@@ -111,5 +135,6 @@ class LiveCollector:
                 delay = self.poll_interval_s
             else:
                 failures += 1
-                delay = min(self.max_backoff_s, self.poll_interval_s * (2 ** min(failures - 1, 8)))
+                delay = self.retry_after_s if self.retry_after_s is not None else min(
+                    self.max_backoff_s, self.poll_interval_s * (2 ** min(failures - 1, 8)))
             await asyncio.sleep(delay)

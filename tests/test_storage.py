@@ -21,3 +21,16 @@ def test_raw_and_coverage_batches_are_recorded(tmp_path):
     assert raw[0] is None and raw[1] is None
     assert "position_missing" in raw[2] and "altitude_missing" in raw[2]
     assert sample == (1,)
+
+
+def test_coverage_buckets_use_integer_peak_counts(tmp_path):
+    recorder = SQLiteRecorder(tmp_path / "coverage.db", batch_size=10, flush_interval_s=1,
+                              low_altitude_m=304.8, low_quality_after_s=45)
+    recorder._initialize()
+    recorder._write_batch([
+        ("coverage", (60.0, 4, 1, 0, 5.0)),
+        ("coverage", (90.0, 6, 2, 1, 7.0)),
+    ])
+    result = recorder.coverage(since=0, bucket_s=60)["samples"]
+    assert result == [{"bucket_start": 60, "aircraft_count": 6, "below_threshold_count": 2,
+                       "on_ground_count": 1, "mean_data_age_s": 6.0}]

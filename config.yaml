@@ -8,6 +8,8 @@ opensky:
   token_url: https://auth.opensky-network.org/auth/realms/opensky-network/protocol/openid-connect/token
   api_url: https://opensky-network.org/api/states/all
   request_timeout_s: 20
+  daily_credit_quota: 4000
+  estimated_credits_per_states_request: 1
 
 collector:
   poll_interval_s: 30

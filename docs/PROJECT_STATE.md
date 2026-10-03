@@ -32,13 +32,13 @@ From the project root, activate `.venv`, install `requirements.txt`, export `OPE
 - `GET /api/health`: `{status, updated_at, message}`.
 - `GET /api/airport`: configured center, radius, ring, map and display settings.
 - `GET /api/aircraft`: snapshot envelope with active positioned aircraft and recently lost records.
-- `GET /api/coverage`: bucketed count, below-threshold count, on-ground count, and mean source data age over the configured rolling window.
+- `GET /api/coverage`: configured-window buckets with peak aircraft/below-threshold/on-ground counts and mean source data age.
 - `/ws/live`: `{type, ts, source_status, data}` snapshots/status; data includes `aircraft`, counts, message, and `recently_lost`.
 - Aircraft entries include raw SI fields, fetch/seen times, ENU x/y and velocity components, age, analysis-only age-compensated coordinates, bounded trail history, and quality flags.
 
 ## Configuration
 
-`config.yaml` contains airport, OpenSky, polling/backoff, state history/staleness/drop/tombstone thresholds, optional alpha-beta smoothing, SQLite path/batch/flush interval, coverage window/bucket, CORS and frontend map settings. Secrets remain environment variables. `AIR_COL_CONFIG` selects an alternate YAML file.
+`config.yaml` contains airport, OpenSky, polling/backoff, daily credit quota and estimated credits per request, state history/staleness/drop/tombstone thresholds, optional alpha-beta smoothing, SQLite path/batch/flush interval, coverage window/bucket, CORS and frontend map settings. Startup estimates credits/day and warns if it exceeds the configured quota. The estimate is only as accurate as the configured per-request cost; verify actual usage in the OpenSky account. Secrets remain environment variables. `AIR_COL_CONFIG` selects an alternate YAML file.
 
 ## Database
 
@@ -46,4 +46,4 @@ From the project root, activate `.venv`, install `requirements.txt`, export `OPE
 
 ## Known limitations
 
-Coverage summaries reflect received public ADS-B feed samples and cannot establish complete airport traffic. Stale entries leave active state after the configured timeout and remain briefly in `recently_lost`; missing/incomplete states are stored but excluded from analysis. Optional smoothing is disabled by default. The dashboard shows trails only while aircraft remain active. No replay, trajectory prediction, conflict detection, or runway modeling exists yet.
+Coverage summaries reflect received public ADS-B feed samples and cannot establish complete airport traffic. The adapter logs rate-limit headers when present; HTTP 429 honors a retry-after-seconds header when provided and falls back to configured exponential backoff otherwise. Stale entries leave active state after the configured timeout and remain briefly in `recently_lost`; missing/incomplete states are stored but excluded from analysis. Optional smoothing is disabled by default. The dashboard shows trails only while aircraft remain active. No replay, trajectory prediction, conflict detection, or runway modeling exists yet.

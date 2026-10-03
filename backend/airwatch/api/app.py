@@ -36,7 +36,9 @@ def make_collector(recorder: SQLiteRecorder) -> LiveCollector:
                          max_backoff_s=float(c["max_backoff_s"]),
                          sparse_count_threshold=int(c["sparse_count_threshold"]),
                          low_altitude_ft=float(c["low_altitude_ft"]),
-                         manager_config=CONFIG["state_manager"], recorder=recorder)
+                         manager_config=CONFIG["state_manager"], recorder=recorder,
+                         daily_credit_quota=float(CONFIG["opensky"]["daily_credit_quota"]),
+                         estimated_credits_per_request=float(CONFIG["opensky"]["estimated_credits_per_states_request"]))
 
 
 @asynccontextmanager

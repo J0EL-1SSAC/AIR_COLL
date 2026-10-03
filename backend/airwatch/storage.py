@@ -160,7 +160,7 @@ class SQLiteRecorder:
 
     def coverage(self, *, since: float, bucket_s: int) -> dict:
         sql = """SELECT CAST(sample_time / ? AS INTEGER) * ? AS bucket,
-                 AVG(aircraft_count), AVG(below_threshold_count), AVG(on_ground_count), AVG(mean_data_age_s)
+                 MAX(aircraft_count), MAX(below_threshold_count), MAX(on_ground_count), AVG(mean_data_age_s)
                  FROM coverage_samples WHERE sample_time >= ? GROUP BY bucket ORDER BY bucket"""
         with self._connect() as connection:
             rows = connection.execute(sql, (bucket_s, bucket_s, since)).fetchall()

@@ -44,7 +44,9 @@ async def run(config: dict, once: bool) -> int:
                               max_backoff_s=float(c["max_backoff_s"]),
                               sparse_count_threshold=int(c["sparse_count_threshold"]),
                               low_altitude_ft=float(c["low_altitude_ft"]),
-                              manager_config=manager, recorder=recorder)
+                              manager_config=manager, recorder=recorder,
+                              daily_credit_quota=float(o["daily_credit_quota"]),
+                              estimated_credits_per_request=float(o["estimated_credits_per_states_request"]))
     try:
         if not once:
             await collector.run_forever()

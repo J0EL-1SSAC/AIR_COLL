@@ -24,6 +24,22 @@ class OpenSkyError(RuntimeError):
     """An OpenSky request failed; callers must present this as degraded data."""
 
 
+class OpenSkyRateLimitError(OpenSkyError):
+    def __init__(self, message: str, retry_after_s: float | None = None):
+        super().__init__(message)
+        self.retry_after_s = retry_after_s
+
+
+def retry_after_seconds(value: str | None) -> float | None:
+    if value is None:
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
 class OpenSkySource:
     def __init__(self, *, token_url: str, api_url: str, timeout_s: float):
         self.token_url = token_url
@@ -64,6 +80,16 @@ class OpenSkySource:
             self._token = payload["access_token"]
             self._token_expires_at = time.time() + float(payload.get("expires_in", 300))
             return self._token
+        except httpx.HTTPStatusError as exc:
+            response = exc.response
+            if response.status_code == 429:
+                retry_value = response.headers.get("X-Rate-Limit-Retry-After-Seconds") or response.headers.get("Retry-After")
+                retry_after = retry_after_seconds(retry_value)
+                logger.warning("OpenSky OAuth rate limited; X-Rate-Limit-Remaining=%s; retry after=%s",
+                               response.headers.get("X-Rate-Limit-Remaining", "not provided"),
+                               retry_value if retry_value is not None else "not provided")
+                raise OpenSkyRateLimitError("OpenSky OAuth rate limited (HTTP 429)", retry_after) from exc
+            raise OpenSkyError(f"OpenSky OAuth token request failed: {exc}") from exc
         except (httpx.HTTPError, ValueError, KeyError) as exc:
             raise OpenSkyError(f"OpenSky OAuth token request failed: {exc}") from exc
 
@@ -78,10 +104,16 @@ class OpenSkySource:
             )
             remaining = response.headers.get("X-Rate-Limit-Remaining")
             reset = response.headers.get("X-Rate-Limit-Reset")
-            logger.info("OpenSky states request: HTTP %s; X-Rate-Limit-Remaining=%s; X-Rate-Limit-Reset=%s",
+            retry_header = response.headers.get("X-Rate-Limit-Retry-After-Seconds")
+            logger.info("OpenSky states request: HTTP %s; X-Rate-Limit-Remaining=%s; X-Rate-Limit-Reset=%s; X-Rate-Limit-Retry-After-Seconds=%s",
                         response.status_code, remaining if remaining is not None else "not provided",
-                        reset if reset is not None else "not provided")
-            if response.status_code == 429 or response.status_code >= 500:
+                        reset if reset is not None else "not provided",
+                        retry_header if retry_header is not None else "not provided")
+            if response.status_code == 429:
+                retry_value = retry_header or response.headers.get("Retry-After")
+                retry_after = retry_after_seconds(retry_value)
+                raise OpenSkyRateLimitError("OpenSky rate limited (HTTP 429)", retry_after)
+            if response.status_code >= 500:
                 raise OpenSkyError(f"OpenSky temporarily unavailable (HTTP {response.status_code})")
             response.raise_for_status()
             payload = response.json()
