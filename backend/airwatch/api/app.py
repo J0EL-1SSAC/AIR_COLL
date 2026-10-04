@@ -25,6 +25,9 @@ from ..replay import ReplaySource
 from ..risk import validate_timing_settings
 from ..storage import SQLiteRecorder
 from ..runways import RunwayDataError, load_runways
+from ..approach import ApproachTracker
+from ..occupancy import OccupancyTracker
+from ..approach_store import SQLiteApproachStore
 
 ROOT = Path(__file__).resolve().parents[3]
 CONFIG_PATH = Path(os.environ.get("AIR_COL_CONFIG", ROOT / "config.yaml"))
@@ -64,12 +67,28 @@ def make_collector(recorder, *, clock=None, mode="LIVE", source=None, on_publish
                          clock=clock, mode=mode, record_live=(mode == "LIVE"), on_publish=on_publish,
                          prediction_config=CONFIG["prediction"], alert_processor=process_alert_cycle)
     collector.alert_manager = alert_manager
+    collector.approach_tracker = ApproachTracker(CONFIG.get("approach", {}))
+    collector.occupancy_tracker = OccupancyTracker(CONFIG.get("occupancy", {}))
+    collector.runway_definitions = []
+    collector.current_approaches = []
+    collector.current_occupancy = {"runways": {}, "experimental": True}
+    try:
+        collector.runway_definitions = runway_definitions()
+    except RunwayDataError as error:
+        logger.warning("Runway surveillance unavailable: %s", error)
     return collector
 
 
 async def process_alert_cycle(collector: LiveCollector) -> None:
     now = collector.clock.now()
     states = collector.manager.snapshot(now, include_unpositioned=True)
+    approaches = collector.approach_tracker.update(states, collector.runway_definitions, now)
+    collector.current_approaches = approaches
+    for approach in approaches:
+        await asyncio.to_thread(app.state.approach_store.upsert, collector.mode, approach)
+    gate = occupancy_coverage_gate()
+    collector.current_occupancy = collector.occupancy_tracker.update(
+        states, collector.runway_definitions, now, gate["assessable"], gate)
     result = compute_pair_cpas(
         states, airport_radius_nm=float(AIRPORT["radius_nm"]), cpa_settings=CONFIG["cpa"],
         prediction_settings=CONFIG["prediction"], inverse_transformer=collector.predictor.inverse_transformer)
@@ -157,9 +176,15 @@ async def lifespan(app: FastAPI):
     app.state.replay_task = app.state.replay_source = app.state.replay_collector = None
     app.state.event_store = SQLiteEventStore(db_path)
     await asyncio.to_thread(app.state.event_store.initialize)
+    app.state.approach_store = SQLiteApproachStore(db_path)
+    await asyncio.to_thread(app.state.approach_store.initialize)
     for warning in validate_timing_settings(CONFIG):
         logger.warning("Alert timing configuration: %s", warning)
     logger.info("Potential Conflict risk profile: %s", os.environ.get("AIR_COL_RISK_PROFILE", CONFIG["risk"]["active_profile"]))
+    if float(CONFIG.get("approach", {}).get("max_data_age_s", 0)) <= float(CONFIG["collector"]["poll_interval_s"]):
+        logger.warning("Approach max_data_age_s should exceed poll_interval_s for useful sampled approach tracking.")
+    if float(CONFIG.get("occupancy", {}).get("max_data_age_s", 0)) <= float(CONFIG["collector"]["poll_interval_s"]):
+        logger.warning("Occupancy max_data_age_s should exceed poll_interval_s for useful experimental occupancy tracking.")
     recorder = SQLiteRecorder(db_path, batch_size=int(storage["batch_size"]),
                               flush_interval_s=float(storage["flush_interval_s"]),
                               low_altitude_m=float(CONFIG["collector"]["low_altitude_ft"]) / _M_TO_FT,
@@ -333,6 +358,81 @@ def runway_definitions():
                         longitude=float(AIRPORT["longitude"]), settings=settings)
 
 
+def occupancy_coverage_gate():
+    settings = CONFIG.get("occupancy", {})
+    output = CONFIG["coverage_report"].get("output_dir", "reports/coverage")
+    path = Path(output)
+    if not path.is_absolute():
+        path = ROOT / path
+    summary_path = path / "coverage_summary.json"
+    if not summary_path.exists():
+        return {"assessable": False, "reason": "No measured coverage report is available.", "numbers": None}
+    try:
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {"assessable": False, "reason": "Measured coverage report could not be read.", "numbers": None}
+    hours = float(summary.get("recording", {}).get("observed_hours", 0))
+    low_rate = summary.get("runway_buffer_low_altitude_reports_per_hour")
+    ground_rate = summary.get("runway_buffer_on_ground_reports_per_hour")
+    buffer_rate = summary.get("runway_buffer_reports_per_hour")
+    threshold_hours = float(settings.get("minimum_recording_hours", 6))
+    thresholds = {"recording_hours": threshold_hours,
+                  "low_altitude_buffer_reports_per_hour": float(settings.get("minimum_low_altitude_buffer_reports_per_hour", 5)),
+                  "on_ground_buffer_reports_per_hour": float(settings.get("minimum_on_ground_buffer_reports_per_hour", 5))}
+    # Older Phase 8 summaries expose airport-wide low/ground rates, not runway-buffer rates.
+    # They are not sufficient evidence for assessability, so fail closed.
+    numbers = {"recording_hours": hours, "low_altitude_reports_per_hour_inside_buffer": low_rate,
+               "on_ground_reports_per_hour_inside_buffer": ground_rate, "runway_buffer_reports_per_hour": buffer_rate,
+               "runways_available": bool(summary.get("runways_available")), "thresholds": thresholds}
+    ok = (numbers["runways_available"] and hours >= threshold_hours and low_rate is not None and ground_rate is not None
+          and buffer_rate is not None and low_rate >= thresholds["low_altitude_buffer_reports_per_hour"]
+          and ground_rate >= thresholds["on_ground_buffer_reports_per_hour"]
+          and buffer_rate >= thresholds["on_ground_buffer_reports_per_hour"])
+    return {"assessable": bool(ok), "numbers": numbers,
+            "reason": "Measured coverage meets the configured experimental gate." if ok else
+            "Runway occupancy not assessable with current data: measured recording duration, on-ground/runway-buffer coverage, or runway geometry is below the configured gate."}
+
+
+@app.get("/api/approaches")
+async def approaches():
+    collector = app.state.active_collector
+    return {"mode": collector.mode, "updated_at": collector.clock.isoformat(),
+            "approaches": collector.current_approaches,
+            "recorded_tracks": await asyncio.to_thread(app.state.approach_store.query, collector.mode)}
+
+
+@app.get("/api/runway-status")
+async def runway_status():
+    collector = app.state.active_collector
+    gate = occupancy_coverage_gate()
+    occupancy = collector.current_occupancy
+    by_end = {}
+    window_s = float(CONFIG["approach"].get("runway_in_use_window_min", 20)) * 60
+    recent_tracks = await asyncio.to_thread(app.state.approach_store.query, collector.mode, collector.clock.now()-window_s)
+    eligible_states = {"LIKELY_APPROACHING", "NEAR_THRESHOLD", "PASSED_THRESHOLD_ZONE"}
+    evidence = {}
+    for item in recent_tracks:
+        if item.get("state") in eligible_states:
+            end = item.get("runway_end")
+            evidence[end] = evidence.get(end, 0) + 1
+    for item in collector.current_approaches:
+        end = item["runway_end"]
+        by_end.setdefault(end, []).append(item)
+    runway_in_use = {"estimate": "unknown", "evidence_count": 0,
+                     "window_s": window_s, "reason": "Not enough confirmed approach observations in the configured window."}
+    eligible = [(end, count) for end, count in evidence.items()
+                if count >= int(CONFIG["approach"].get("runway_in_use_min_approaches", 2))]
+    if eligible:
+        end, count = max(eligible, key=lambda row: row[1])
+        runway_in_use = {"estimate": end, "evidence_count": count, "window_s": window_s,
+                         "reason": "Estimate from current approach observations; not an official runway-in-use source."}
+    return {"mode": collector.mode, "updated_at": collector.clock.isoformat(),
+            "runway_in_use": runway_in_use, "approaches_by_end": by_end,
+            "occupancy_assessable": gate["assessable"], "coverage_gate": gate,
+            "experimental_occupancy": occupancy,
+            "runway_ends": sorted({end.identifier for rw in collector.runway_definitions for end in (rw.end_a, rw.end_b)})}
+
+
 @app.get("/api/runways")
 async def runways():
     try:
@@ -361,7 +461,9 @@ async def runway_coverage_summary():
             "low_altitude_reports_per_hour": data.get("low_altitude_reports_per_hour"),
             "on_ground_reports_per_hour": data.get("on_ground_reports_per_hour"),
             "runway_buffer_report_total": data.get("runway_buffer_report_total"),
-            "recommendations": data.get("recommendations")}
+            "recommendations": data.get("recommendations"),
+            "runway_buffer_low_altitude_reports_per_hour": data.get("runway_buffer_low_altitude_reports_per_hour"),
+            "runway_buffer_on_ground_reports_per_hour": data.get("runway_buffer_on_ground_reports_per_hour")}
 
 
 @app.get("/api/replay/status")
@@ -370,6 +472,56 @@ async def replay_status():
     return {"mode": app.state.active_collector.mode, "running": source is not None,
             "completed_cycles": 0 if source is None else source._index,
             "total_cycles": 0 if source is None else source.total_cycles}
+
+
+@app.get("/api/replay/sessions")
+async def replay_sessions():
+    gap_limit = float(CONFIG.get("replay_ui", {}).get("session_gap_s", 300))
+    db_path = app.state.database_path
+    def read_sessions():
+        import sqlite3
+        with sqlite3.connect(db_path) as db:
+            times = [float(row[0]) for row in db.execute("SELECT sample_time FROM coverage_samples ORDER BY sample_time")]
+            cycle_counts = {float(t): (int(a), int(low), int(ground)) for t,a,low,ground in db.execute(
+                "SELECT sample_time,aircraft_count,below_threshold_count,on_ground_count FROM coverage_samples ORDER BY sample_time")}
+        groups=[]
+        for ts in times:
+            if not groups or ts-groups[-1][-1] > gap_limit: groups.append([ts])
+            else: groups[-1].append(ts)
+        output=[]
+        with sqlite3.connect(db_path) as db:
+            for index, group in enumerate(groups):
+                start_ts,end_ts=group[0],group[-1]
+                distinct=db.execute("SELECT COUNT(DISTINCT icao24) FROM raw_states WHERE fetch_time>=? AND fetch_time<=?",(start_ts,end_ts)).fetchone()[0]
+                peak=max((cycle_counts.get(ts,(0,0,0))[0] for ts in group),default=0)
+                output.append({"session_id":f"{start_ts:.3f}","start_time":start_ts,"end_time":end_ts,
+                    "duration_s":end_ts-start_ts,"poll_cycles":len(group),"distinct_aircraft":int(distinct or 0),
+                    "peak_aircraft":peak,"gaps":sum(1 for a,b in zip(group,group[1:]) if b-a>float(CONFIG["coverage_report"]["max_poll_gap_s"])),
+                    "low_altitude_reports":sum(cycle_counts.get(ts,(0,0,0))[1] for ts in group),
+                    "on_ground_reports":sum(cycle_counts.get(ts,(0,0,0))[2] for ts in group),
+                    "alerts_stored":int(db.execute("SELECT COUNT(*) FROM events WHERE mode='REPLAY' AND first_seen_ts>=? AND first_seen_ts<=?",(start_ts,end_ts)).fetchone()[0]),
+                    "data_quality":"recorded observations"})
+        return output
+    return {"sessions": await asyncio.to_thread(read_sessions), "session_gap_s": gap_limit, "source":"app-recorded LIVE poll cycles"}
+
+
+@app.get("/api/replay/cycles")
+async def replay_cycles(start: float, end: float, limit: int = Query(default=200, ge=1, le=2000), offset: int = Query(default=0, ge=0)):
+    if start > end: raise HTTPException(422, "start must be earlier than end")
+    def read_cycles():
+        import sqlite3
+        with sqlite3.connect(app.state.database_path) as db:
+            total=db.execute("SELECT COUNT(*) FROM coverage_samples WHERE sample_time>=? AND sample_time<=?",(start,end)).fetchone()[0]
+            rows=db.execute("""SELECT sample_time,aircraft_count,below_threshold_count,on_ground_count
+                FROM coverage_samples WHERE sample_time>=? AND sample_time<=? ORDER BY sample_time LIMIT ? OFFSET ?""",
+                (start,end,limit,offset)).fetchall()
+            result=[]
+            for ts,count,low,ground in rows:
+                result.append({"time":ts,"aircraft":count,"low_altitude":low,"on_ground":ground,
+                    "pairs":None,"alerts_opened":None})
+            return result,total
+    cycles,total=await asyncio.to_thread(read_cycles)
+    return {"cycles":cycles,"limit":limit,"offset":offset,"total":total,"note":"Pairs and alert counts are unavailable because cycle-specific derived records are not stored."}
 
 
 @app.post("/api/replay/start")
