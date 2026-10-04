@@ -17,7 +17,7 @@ function Legend({airport}) {
 export default function FiltersPanel({airport,counts, predictionCounts, mapLayers, onLayerChange, labelMode, onLabelMode, basemap, onBasemap, groundOnly, onGroundOnly, runwayMessage,weather,frequencyData}) {
   const layers = [
     ['trails','Trails'], ['predictions','Predictions'], ['uncertainty','Uncertainty circles'],
-    ['closestApproaches','Closest-approach lines'], ['radius','Monitoring radius'],
+    ['closestApproaches','Closest-approach lines'], ['radius','Monitoring radius'], ['estimatedRoute','Selected aircraft estimated route'],
     ['runways','Runways'], ['runwayBuffer','Runway buffer'], ['approachCorridors','Approach corridors'],
   ];
   return <aside className="side-panel left" aria-label="Map layers and filters">

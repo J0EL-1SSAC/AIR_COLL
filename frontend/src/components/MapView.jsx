@@ -1,5 +1,5 @@
 import React, {useEffect, useMemo, useState} from 'react';
-import {Circle, CircleMarker, GeoJSON, MapContainer, Marker, Pane, Polygon, Polyline, TileLayer, Tooltip, useMap} from 'react-leaflet';
+import {Circle, CircleMarker, GeoJSON, MapContainer, Marker, Pane, Polygon, Polyline, Popup, TileLayer, Tooltip, useMap} from 'react-leaflet';
 import L from 'leaflet';
 import {ALTITUDE_BANDS, DISTANCE_FORMAT, UI} from '../config';
 
@@ -16,7 +16,7 @@ function isReducedQuality(aircraft) {
   return aircraft.quality_flags?.includes('LOW_QUALITY') || aircraft.quality_flags?.includes('stale_position');
 }
 
-function AircraftIcon({aircraft, selected, labelMode, bands, zoom, labelZoom, labelAllowed, nearAirport, alertRisk}) {
+function AircraftIcon({aircraft, selected, labelMode, bands, zoom, labelZoom, labelAllowed, nearAirport, alertRisk, children}) {
   const [hovered, setHovered] = useState(false);
   const band = altitudeBand(aircraft, bands);
   const reduced = isReducedQuality(aircraft);
@@ -38,6 +38,7 @@ function AircraftIcon({aircraft, selected, labelMode, bands, zoom, labelZoom, la
       <span className="map-callsign">{aircraft.callsign.trim()}</span>
       {showDetails && <span className="map-detail">{altitudeFt==null?'—':`${Math.round(altitudeFt)} ft`} · {speedKt==null?'—':`${Math.round(speedKt)} kt`}</span>}
     </Tooltip>}
+    {children}
   </Marker>;
 }
 
@@ -128,7 +129,7 @@ function AirportMarker({airport}) {
   return <Marker position={[airport.latitude,airport.longitude]} icon={icon} pane="airports"><Tooltip permanent direction="right" className="airport-label">{airport.icao}</Tooltip></Marker>;
 }
 
-function RunwayLayer({runways, layers, onSelectRunway}) {
+function RunwayLayer({runways, layers, onSelectRunway, activities=[], badgeLimit=3}) {
   return <>
     {runways.map(runway=><React.Fragment key={`runway-${runway.identifier}`}>
       {layers.runwayBuffer&&runway.buffer_geojson&&<>
@@ -139,6 +140,7 @@ function RunwayLayer({runways, layers, onSelectRunway}) {
       </>}
       {layers.approachCorridors&&[runway.end_a,runway.end_b].map(end=><React.Fragment key={`${runway.identifier}-corridor-${end.identifier}`}>
         <GeoJSON data={end.corridor_geojson} pane="runway-corridors"
+          onEachFeature={(_feature,layer)=>layer.bindTooltip(`Approach corridor · RWY ${end.identifier}`)}
           style={{color:'var(--color-runway-casing)',weight:3.5,opacity:.8,fillColor:'var(--color-runway-casing)',fillOpacity:.025,dashArray:'3 5'}}/>
         <GeoJSON data={end.corridor_geojson} pane="runway-corridors"
           style={{color:'var(--color-runway-corridor)',weight:1,opacity:.8,fillColor:'var(--color-runway-corridor)',fillOpacity:.09,dashArray:'3 5'}}/>
@@ -156,19 +158,21 @@ function RunwayLayer({runways, layers, onSelectRunway}) {
           style={{color:'var(--color-runway-outline)',weight:2.4,opacity:1,fillOpacity:0}}
           eventHandlers={{click:()=>onSelectRunway(runway)}}/>
         <GeoJSON data={runway.centerline_geojson} pane="runway-core"
+          onEachFeature={(_feature,layer)=>layer.bindTooltip(`Runway extended centerline · ${runway.centerline_extension_m/DISTANCE_FORMAT.metersPerNm} NM beyond each end`)}
           style={{color:'var(--color-runway-centerline)',weight:1.2,opacity:.9,dashArray:'8 5'}}
           eventHandlers={{click:()=>onSelectRunway(runway)}}/>
         {[runway.end_a,runway.end_b].map(end=><CircleMarker key={`${runway.identifier}-end-${end.identifier}`} pane="airport-labels"
           center={[end.latitude,end.longitude]} radius={4} pathOptions={{color:'var(--color-runway-outline)',weight:1.5,fillColor:'var(--color-runway-end)',fillOpacity:1}}
           eventHandlers={{click:()=>onSelectRunway(runway)}}>
           <Tooltip permanent direction="top" className="runway-end-label">{end.identifier}</Tooltip>
+          {(()=>{const recent=activities.filter(item=>item.runway_end===end.identifier&&item.inferred).slice(0,badgeLimit);return recent.length?<Tooltip permanent direction="bottom" className="inferred-runway-badge">{recent.map(item=>`${item.callsign||item.icao24} ${item.activity_type==='LIKELY_LANDED'?'landed':'departed'} ~${new Date(item.time_ts*1000).toLocaleTimeString()} · inferred`).join(' | ')}</Tooltip>:null;})()}
         </CircleMarker>)}
       </>}
     </React.Fragment>)}
   </>;
 }
 
-function MapController({setZoom,focusPair}) {
+function MapController({setZoom,focusPair,selectedAircraft,followAircraft}) {
   const map = useMap();
   useEffect(()=>{const update=()=>setZoom(map.getZoom());map.on('zoomend',update);update();return()=>map.off('zoomend',update);},[map,setZoom]);
   useEffect(()=>{
@@ -176,6 +180,12 @@ function MapController({setZoom,focusPair}) {
     const {aircraft_a:a,aircraft_b:b}=focusPair.cpa_position;
     map.fitBounds([[a.latitude,a.longitude],[b.latitude,b.longitude]],{padding:[UI.mapFocusPadding,UI.mapFocusPadding],maxZoom:UI.mapFocusMaxZoom});
   },[map,focusPair]);
+  useEffect(()=>{
+    if (!selectedAircraft?.latitude || !selectedAircraft?.longitude || focusPair || !followAircraft) return;
+    const target=[selectedAircraft.latitude,selectedAircraft.longitude];
+    if (!map.getBounds().contains(target)) map.panTo(target,{animate:true,duration:UI.mapFocusDurationS});
+    if (map.getZoom() < UI.selectionZoom) map.setZoom(UI.selectionZoom,{animate:true});
+  },[map,selectedAircraft?.icao24,selectedAircraft?.latitude,selectedAircraft?.longitude,followAircraft,focusPair]);
   return null;
 }
 
@@ -189,7 +199,27 @@ function MapSizeHandler(){
   return null;
 }
 
-export default function MapView({airport,runways=[],aircraft,predictions,pairs,activeAlerts=[],focusedEventId,selectedId,onSelect,onSelectRunway=()=>{},focusPair,onFocusPair,layers,labelMode,basemap,onTileFailure,mapNotice}) {
+export default function MapView({airport,runways=[],aircraft,predictions,pairs,activeAlerts=[],focusedEventId,selectedId,highlightedIds=[],selectedAircraft,selectedIsReporting=true,followAircraft=true,onFollowAircraft=()=>{},airportActivity=[],nowMs=Date.now(),mode='LIVE',onSelect,onSelectRunway=()=>{},focusPair,onFocusPair,layers,labelMode,basemap,onTileFailure,mapNotice}) {
+  aircraft=[...new Map(aircraft.map(state=>[state.icao24,state])).values()];
+  const [enrichment,setEnrichment]=useState(null);
+  const [currentApproaches,setCurrentApproaches]=useState([]);
+  useEffect(()=>{
+    let stopped=false;
+    const refresh=()=>fetch(`${import.meta.env.VITE_API_BASE||'http://localhost:8000'}/api/approaches`).then(r=>r.ok?r.json():null).then(data=>{if(!stopped)setCurrentApproaches(data?.approaches||[]);}).catch(()=>{if(!stopped)setCurrentApproaches([]);});
+    refresh();const timer=window.setInterval(refresh,10000);
+    return()=>{stopped=true;window.clearInterval(timer);};
+  },[mode]);
+  useEffect(()=>{
+    let cancelled=false;
+    if(!selectedAircraft||!selectedIsReporting){setEnrichment(null);return;}
+    setEnrichment(null);
+    const base=import.meta.env.VITE_API_BASE||'http://localhost:8000';
+    fetch(`${base}/api/aircraft/${encodeURIComponent(selectedAircraft.icao24)}/info`)
+      .then(response=>response.ok?response.json():Promise.reject(new Error('Reference enrichment unavailable.')))
+      .then(data=>{if(!cancelled)setEnrichment(data);})
+      .catch(()=>{if(!cancelled)setEnrichment({airline:'Unknown',route:{available:false,label:'Route unavailable',reason:'Reference lookup unavailable.'},aircraft:{available:false,reason:'Reference lookup unavailable.'}});});
+    return()=>{cancelled=true;};
+  },[selectedAircraft?.icao24,selectedAircraft?.callsign,selectedIsReporting]);
   const bandColors = ALTITUDE_BANDS;
   const stateById = Object.fromEntries(aircraft.map(state=>[state.icao24,state]));
   const [zoom,setZoom] = useState(airport.map_zoom);
@@ -216,9 +246,11 @@ export default function MapView({airport,runways=[],aircraft,predictions,pairs,a
     if(distance<=thresholds.amber_nm)return 'var(--color-cpa-amber)';
     return 'var(--color-neutral-cpa)';
   };
+  const selectedApproach=currentApproaches.find(item=>item.icao24===selectedId);
+  const selectedRunwayEnd=selectedApproach?runways.flatMap(runway=>[runway.end_a,runway.end_b]).find(end=>end.identifier===selectedApproach.runway_end):null;
   return <div className="map-frame">
     <MapContainer center={[airport.latitude,airport.longitude]} zoom={airport.map_zoom} scrollWheelZoom className="map">
-      <MapController setZoom={setZoom} focusPair={focusPair}/>
+      <MapController setZoom={setZoom} focusPair={focusPair} selectedAircraft={selectedAircraft} followAircraft={followAircraft}/>
       <MapSizeHandler/>
       <Pane name="trails" style={{zIndex:UI.panes.trails}}/><Pane name="pairs" style={{zIndex:UI.panes.pairs}}/>
       <Pane name="prediction-halo" style={{zIndex:UI.panes.predictionHalo}}/><Pane name="predictions" style={{zIndex:UI.panes.predictions}}/>
@@ -229,7 +261,16 @@ export default function MapView({airport,runways=[],aircraft,predictions,pairs,a
       <TileLayer key={basemap} url={UI.tileUrls[basemap]} attribution={UI.tileAttribution[basemap]}
         eventHandlers={{tileerror:onTileFailure}}/>
       {layers.radius&&<Polygon positions={ring} pane="trails" pathOptions={{color:'var(--color-accent)',weight:1.5,opacity:.7,fillOpacity:.015,dashArray:'6 7'}}/>}
-      <RunwayLayer runways={runways} layers={layers} onSelectRunway={onSelectRunway}/>
+      <RunwayLayer runways={runways} layers={layers} onSelectRunway={onSelectRunway} activities={airportActivity} badgeLimit={airport.runway_badge_limit}/>
+      {layers.approachCorridors&&selectedApproach&&selectedRunwayEnd?.corridor_geojson&&<GeoJSON data={selectedRunwayEnd.corridor_geojson} pane="runway-corridors" style={{color:'var(--color-accent)',weight:3,fillColor:'var(--color-accent)',fillOpacity:.12,dashArray:'5 4'}}/>}
+      {selectedApproach&&selectedRunwayEnd?.landing_threshold&&selectedAircraft?.latitude!=null&&<Polyline pane="runway-corridors" positions={[[selectedAircraft.latitude,selectedAircraft.longitude],[selectedRunwayEnd.landing_threshold.latitude,selectedRunwayEnd.landing_threshold.longitude]]} pathOptions={{color:'var(--color-accent)',weight:2.5,dashArray:'4 4'}}><Tooltip sticky>Detected approach · line to RWY {selectedRunwayEnd.identifier} landing threshold</Tooltip></Polyline>}
+      {airportActivity.filter(item=>item.inferred&&item.latitude!=null&&item.longitude!=null&&nowMs/1000-item.time_ts<airport.inferred_display_s).map(item=>{
+        const age=Math.max(0,nowMs/1000-item.time_ts),opacity=Math.max(0.15,1-age/airport.inferred_display_s);
+        return <CircleMarker key={`inferred-${item.activity_type}-${item.icao24}-${item.time_ts}`} center={[item.latitude,item.longitude]} radius={8}
+          pathOptions={{color:'var(--color-warning)',weight:2,dashArray:'4 3',fillOpacity:0,opacity}}>
+          <Tooltip sticky>Last seen {(item.distance_to_threshold_nm??0).toFixed(1)} NM from RWY {item.runway_end} · {item.activity_type==='LIKELY_LANDED'?'likely landed':'likely departed'} (inferred)</Tooltip>
+        </CircleMarker>;
+      })}
       {layers.trails&&aircraft.map(state=><TrailLayer key={`trail-${state.icao24}`} aircraft={state}
         color={bandColors[altitudeBand(state,airport.altitude_bands_m)]}
         oldestOpacity={airport.trail_oldest_opacity??UI.oldestTrailOpacityFallback}
@@ -243,12 +284,40 @@ export default function MapView({airport,runways=[],aircraft,predictions,pairs,a
       {liveAlerts.map(event=><AlertLayer key={event.event_id} event={event} currentAircraft={stateById}
         focused={focusedEventId===event.event_id} onFocus={focusEvent}/>) }
       <AirportMarker airport={airport}/>
+      {layers.estimatedRoute&&selectedIsReporting&&enrichment?.route?.destination?.latitude!=null&&selectedAircraft?.latitude!=null&&<Polyline pane="predictions" positions={[[selectedAircraft.latitude,selectedAircraft.longitude],[enrichment.route.destination.latitude,enrichment.route.destination.longitude]]} pathOptions={{color:'var(--color-estimated-route)',weight:2,dashArray:'2 6',opacity:.9}}><Tooltip sticky>Estimated route to {enrichment.route.destination.icao_code||enrichment.route.destination.iata_code||enrichment.route.destination.ident} · great-circle, not actual or filed path</Tooltip></Polyline>}
       {aircraft.map(state=><AircraftIcon key={state.icao24} aircraft={{...state,onSelect:()=>onSelect(state)}}
-        selected={selectedId===state.icao24} labelMode={labelMode} bands={airport.altitude_bands_m}
+        selected={selectedId===state.icao24||highlightedIds.includes(state.icao24)} labelMode={labelMode} bands={airport.altitude_bands_m}
         zoom={zoom} labelZoom={labelZoom} labelAllowed={labelsAllowed.has(state.icao24)}
-        nearAirport={state.distance_nm!=null&&state.distance_nm<(airport.label_exclusion_nm??2)} alertRisk={alertLevels[state.icao24]}/>) }
+        nearAirport={state.distance_nm!=null&&state.distance_nm<(airport.label_exclusion_nm??2)} alertRisk={alertLevels[state.icao24]}>
+        {selectedId===state.icao24&&<Popup className="aircraft-map-popup" closeButton autoPan offset={[20,-10]} eventHandlers={{remove:()=>onSelect(null)}}><AircraftMapCard aircraft={state} info={enrichment} followAircraft={followAircraft} onFollowAircraft={onFollowAircraft}/></Popup>}
+      </AircraftIcon>)}
+      {!selectedIsReporting&&selectedAircraft?.latitude!=null&&selectedAircraft?.longitude!=null&&<CircleMarker center={[selectedAircraft.latitude,selectedAircraft.longitude]} radius={11}
+        pathOptions={{color:'var(--color-warning)',weight:2,dashArray:'4 3',fillOpacity:0}}>
+        <Tooltip permanent direction="top">Last seen · not currently reporting</Tooltip>
+        <Popup className="aircraft-map-popup" closeButton autoPan><AircraftMapCard aircraft={selectedAircraft} isReporting={false}/></Popup>
+      </CircleMarker>}
     </MapContainer>
     {mapNotice&&<div className="map-notice" role="status">{mapNotice}</div>}
+    <div className="map-legend" aria-label="Map symbol legend"><b>Map legend</b><span>✈ Solid icon · observed ADS-B aircraft</span><span>! Badge · stale or low quality</span><span>Blue ring · selected aircraft</span><span>Colored ring and line · active Potential Conflict</span><span>Dashed amber ring · last observed position, inferred activity</span><span>Dashed line · predicted path · solid line · observed trail</span><span>Dotted blue line · estimated great-circle route</span><span>Gray outline · runway · gray funnel · approach corridor</span></div>
     <div className="map-caption">{{dark:'CARTO Dark Matter',light:'CARTO Voyager',osm:'OpenStreetMap'}[basemap]} · {airport.icao} · {aircraft.length} active aircraft</div>
   </div>;
+}
+
+function AircraftMapCard({aircraft,info,isReporting=true,followAircraft=true,onFollowAircraft=()=>{}}) {
+  const callsign=aircraft.callsign?.trim()||'Unknown callsign';
+  const altitude=aircraft.geo_altitude_m??aircraft.baro_altitude_m;
+  const route=info?.route;
+  const destination=route?.destination;
+  const routeDistanceM=destination?.latitude!=null&&destination?.longitude!=null&&aircraft.latitude!=null
+    ?L.latLng(aircraft.latitude,aircraft.longitude).distanceTo([destination.latitude,destination.longitude]):null;
+  const routeEta=routeDistanceM!=null&&Number(aircraft.velocity_mps)>0?routeDistanceM/Number(aircraft.velocity_mps):null;
+  const etaMargin=Number(info?.eta_uncertainty_fraction??0.2);
+  const airportLabel=value=>value?`${value.name||'Unknown airport'}, ${value.municipality||'Unknown city'} (${value.icao_code||value.ident||'Unknown ICAO'}${value.iata_code?` / ${value.iata_code}`:''})`:'Unknown · airport reference unavailable';
+  return <article className="aircraft-map-card"><header><h2>{callsign}</h2><strong>{info?.airline||'Unknown airline'}</strong><code>{aircraft.icao24}</code><label><input type="checkbox" checked={followAircraft} onChange={event=>onFollowAircraft(event.target.checked)}/> Follow aircraft</label></header>
+    <section><b>Reported route (callsign database)</b>{route?.available?<><span>From: {airportLabel(route.origin)}</span><span>To: {airportLabel(route.destination)}</span><span>{route.route_label} · source {route.source}</span>{routeDistanceM!=null&&<span>Estimated great-circle distance {(routeDistanceM/DISTANCE_FORMAT.metersPerNm).toFixed(1)} NM · not actual/filed path</span>}{routeEta!=null&&<span>Estimated ETA window {Math.round(routeEta*(1-etaMargin))}–{Math.round(routeEta*(1+etaMargin))} s based on current ground speed</span>}</>:<span>Route unavailable · {route?.reason||'Waiting for reference lookup.'}</span>}</section>
+    <section><b>Aircraft</b><span>{info?.aircraft?.type||'Unknown type'} · {info?.aircraft?.registration||'Unknown registration'}</span><span>Operator: {info?.aircraft?.operator||'Unknown'}</span></section>
+    <section><b>Live state</b><span>{altitude==null?'Unknown':`${Math.round(altitude/DISTANCE_FORMAT.metersPerFoot)} ft · ${Math.round(altitude)} m`}</span><span>{aircraft.velocity_mps==null?'Unknown':`${Math.round(aircraft.velocity_mps*DISTANCE_FORMAT.metersPerSecondToKnots)} kt`} · Track {aircraft.track_deg==null?'Unknown':`${Math.round(aircraft.track_deg)}°`}</span><span>Vertical rate {aircraft.vertical_rate_mps==null?'Unknown':`${Math.round(aircraft.vertical_rate_mps*UI.feetPerMinutePerMps)} ft/min`} · Age {Math.round(aircraft.age_s||0)} s</span><span>On ground: {aircraft.on_ground==null?'Unknown':aircraft.on_ground?'Yes':'No'} · Distance: {aircraft.distance_nm==null?'Unknown':`${aircraft.distance_nm.toFixed(1)} NM`}</span><span>Altitude basis: {aircraft.geo_altitude_m!=null?'Geometric':aircraft.baro_altitude_m!=null?'Barometric':'Unknown'} · Quality: {(aircraft.quality_flags||[]).join(', ')||'No flags reported'}</span></section>
+    <section><b>Phase of flight</b><span>Not classified</span></section><section><b>Runway and radio</b><span>Unknown · not a radio observation</span></section>
+    {!isReporting&&<section><b>Last seen</b><span>Aircraft no longer reporting. Last seen at {Number(aircraft.latitude).toFixed(5)}, {Number(aircraft.longitude).toFixed(5)}.</span></section>}
+    <section><b>Source</b><span>Live state: ADS-B · aircraft/route reference: adsbdb. Route may be outdated or incorrect.</span><span>adsbdb credits PlaneBase, David Taylor and Jim Mason; route data is not stored in SQLite.</span></section></article>;
 }

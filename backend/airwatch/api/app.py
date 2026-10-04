@@ -28,9 +28,13 @@ from ..runways import RunwayDataError, load_runways
 from ..approach import ApproachTracker
 from ..occupancy import OccupancyTracker
 from ..approach_store import SQLiteApproachStore
-from ..frequencies import load_frequencies, estimate_facility_roles
+from ..frequencies import load_frequencies, estimate_facility_roles, estimate_aircraft_facilities
 from ..airport_reference import AirportReferenceIndex
+from ..enrichment import EnrichmentService
+from ..activity_store import AirportActivityStore
+from ..airport_activity import infer_landing, infer_departure
 from ..weather import LiveWeatherService
+from ..replay_summary_store import ReplaySummaryStore
 
 ROOT = Path(__file__).resolve().parents[3]
 CONFIG_PATH = Path(os.environ.get("AIR_COL_CONFIG", ROOT / "config.yaml"))
@@ -89,6 +93,16 @@ async def process_alert_cycle(collector: LiveCollector) -> None:
     collector.current_approaches = approaches
     for approach in approaches:
         await asyncio.to_thread(app.state.approach_store.upsert, collector.mode, approach)
+        inferred = infer_landing(approach, CONFIG["airport_activity"],
+            airport_elevation_m=float(CONFIG["coverage_report"]["ground_elevation_m"]))
+        if inferred:
+            await asyncio.to_thread(app.state.activity_store.upsert, collector.mode, inferred)
+    runway_ends=[end for runway in collector.runway_definitions for end in (runway.end_a,runway.end_b)]
+    for state in states:
+        inferred = infer_departure(state, runway_ends, CONFIG["airport_activity"],
+            airport_elevation_m=float(CONFIG["coverage_report"]["ground_elevation_m"]))
+        if inferred:
+            await asyncio.to_thread(app.state.activity_store.upsert, collector.mode, inferred)
     gate = occupancy_coverage_gate()
     collector.current_occupancy = collector.occupancy_tracker.update(
         states, collector.runway_definitions, now, gate["assessable"], gate)
@@ -96,6 +110,8 @@ async def process_alert_cycle(collector: LiveCollector) -> None:
         states, airport_radius_nm=float(AIRPORT["radius_nm"]), cpa_settings=CONFIG["cpa"],
         prediction_settings=CONFIG["prediction"], inverse_transformer=collector.predictor.inverse_transformer)
     changed = collector.alert_manager.process_cycle(result["pairs"], states, now)
+    collector.last_pair_count = len(result["pairs"])
+    collector.last_alerts_opened = sum(1 for item in changed if item.get("sub_event") == "opened")
     await app.state.event_store.upsert_many([item.get("event", item) for item in changed])
     for item in changed:
         sub_event = item.get("sub_event")
@@ -143,6 +159,7 @@ async def finish_replay():
 
 
 async def run_replay(source: ReplaySource, collector: LiveCollector, clock: ReplayClock, speed: float):
+    session_id = f"{source._times[0]:.3f}"
     try:
         while not source.finished:
             timestamp = source.next_fetch_time
@@ -153,6 +170,16 @@ async def run_replay(source: ReplaySource, collector: LiveCollector, clock: Repl
             else:
                 await clock.wait_until(timestamp, speed)
             await collector.poll_once()
+            states = collector.latest
+            low_altitude_count = sum(
+                1 for state in states
+                if state.get("on_ground") is True or (state.get("baro_altitude_m") is not None
+                    and state["baro_altitude_m"] < collector.low_altitude_m)
+            )
+            on_ground_count = sum(1 for state in states if state.get("on_ground") is True)
+            await asyncio.to_thread(app.state.replay_summary_store.record, session_id, timestamp,
+                collector.aircraft_count, low_altitude_count, on_ground_count,
+                getattr(collector, "last_pair_count", 0), getattr(collector, "last_alerts_opened", 0), clock.now())
     finally:
         if getattr(app.state, "active_collector", None) is collector:
             reason = "replay_ended" if source.finished else "replay_stopped"
@@ -181,6 +208,14 @@ async def lifespan(app: FastAPI):
     await asyncio.to_thread(app.state.event_store.initialize)
     app.state.approach_store = SQLiteApproachStore(db_path)
     await asyncio.to_thread(app.state.approach_store.initialize)
+    app.state.activity_store = AirportActivityStore(db_path)
+    await asyncio.to_thread(app.state.activity_store.initialize)
+    app.state.replay_summary_store = ReplaySummaryStore(db_path)
+    await asyncio.to_thread(app.state.replay_summary_store.initialize)
+    airport_reference_settings = CONFIG["airport_reference"]
+    app.state.enrichment_service = EnrichmentService(settings=CONFIG["enrichment"], db_path=db_path,
+        airport_index=AirportReferenceIndex(ROOT / airport_reference_settings["data_file"],
+                                           ROOT / airport_reference_settings["database_file"]))
     for warning in validate_timing_settings(CONFIG):
         logger.warning("Alert timing configuration: %s", warning)
     logger.info("Potential Conflict risk profile: %s", os.environ.get("AIR_COL_RISK_PROFILE", CONFIG["risk"]["active_profile"]))
@@ -208,6 +243,7 @@ async def lifespan(app: FastAPI):
     except asyncio.CancelledError:
         pass
     await app.state.weather_service.close()
+    await app.state.enrichment_service.close()
     await finish_replay()
     app.state.collector_task.cancel()
     try:
@@ -254,19 +290,31 @@ async def active_alerts(mode: str | None = None):
 
 
 @app.get("/api/events")
-async def events(status: str | None = None, risk: str | None = None, mode: str = "LIVE",
+async def events(status: str | None = None, risk: str | None = None, mode: str | None = None,
                  aircraft: str | None = None, start: float | None = None, end: float | None = None,
                  limit: int = Query(default=100, ge=1, le=1000), offset: int = Query(default=0, ge=0)):
-    if mode not in {"LIVE", "REPLAY"}:
-        raise HTTPException(422, "mode must be LIVE or REPLAY")
+    selected_mode = (mode or getattr(getattr(app.state, "active_collector", None), "mode", "LIVE")).upper()
+    if selected_mode not in {"LIVE", "REPLAY", "ALL"}:
+        raise HTTPException(422, "mode must be LIVE, REPLAY, or ALL")
     if start is not None and end is not None and start > end:
         raise HTTPException(422, "start must be earlier than end")
     if risk and risk.upper() not in {"LOW", "MEDIUM", "HIGH", "CRITICAL", "NORMAL"}:
         raise HTTPException(422, "risk must be LOW, MEDIUM, HIGH, CRITICAL, or NORMAL")
-    result = await asyncio.to_thread(app.state.event_store.query, status=status, risk=risk, mode=mode,
+    result = await asyncio.to_thread(app.state.event_store.query, status=status, risk=risk,
+                                     mode=None if selected_mode == "ALL" else selected_mode,
                                      aircraft=aircraft, start_ts=start, end_ts=end,
                                      limit=limit, offset=offset)
-    return {"mode": mode, "events": result, "limit": limit, "offset": offset}
+    counts = await asyncio.to_thread(app.state.event_store.counts_by_mode)
+    message = None
+    if not result:
+        if selected_mode == "ALL":
+            message = f"0 events match these filters. Database totals: {counts.get('LIVE', 0)} LIVE, {counts.get('REPLAY', 0)} REPLAY."
+        else:
+            other = "REPLAY" if selected_mode == "LIVE" else "LIVE"
+            message = (f"0 {selected_mode} events match these filters. The database contains "
+                       f"{counts.get(selected_mode, 0)} {selected_mode} and {counts.get(other, 0)} {other} events.")
+    return {"mode": selected_mode, "events": result, "counts_by_mode": counts,
+            "message": message, "limit": limit, "offset": offset}
 
 
 @app.get("/api/events/{event_id}")
@@ -296,6 +344,8 @@ async def airport():
             "low_altitude_ft": float(CONFIG["collector"]["low_altitude_ft"]),
             "labels_min_zoom": int(CONFIG["web"].get("labels_min_zoom", 11)),
             "prediction_ticks_min_zoom": int(CONFIG["web"].get("prediction_ticks_min_zoom", 11)),
+            "inferred_display_s": float(CONFIG["airport_activity"]["inferred_display_s"]),
+            "runway_badge_limit": int(CONFIG["airport_activity"]["runway_badge_limit"]),
             "label_exclusion_nm": float(CONFIG["web"].get("label_exclusion_nm", 2)),
             "trail_oldest_opacity": float(CONFIG["web"].get("trail_oldest_opacity", 0.18)),
             "trail_newest_opacity": float(CONFIG["web"].get("trail_newest_opacity", 0.82)),
@@ -347,6 +397,24 @@ async def aircraft_prediction(icao24: str):
         raise HTTPException(404, "Aircraft is not currently active in the selected pipeline.")
     return {"mode": result["mode"], "updated_at": result["updated_at"], "model": result["model"],
             "horizons_s": result["horizons_s"], "prediction": prediction}
+
+
+@app.get("/api/aircraft/{icao24}/info")
+async def aircraft_info(icao24: str):
+    collector = app.state.active_collector
+    state = next((item for item in collector.manager.snapshot(collector.clock.now())
+                  if item["icao24"].lower() == icao24.lower()), None)
+    if state is None or state.get("latitude") is None or state.get("longitude") is None:
+        raise HTTPException(404, "Aircraft is not currently reporting a position.")
+    if state.get("on_ground") is True or (state.get("distance_nm") or 0) > float(AIRPORT["radius_nm"]):
+        raise HTTPException(422, "Reference enrichment is limited to airborne aircraft inside the monitoring radius.")
+    if not CONFIG["enrichment"].get("enabled", False):
+        return {"mode": collector.mode, "airline": "Unknown",
+                "route": {"available": False, "label": "Route unavailable", "reason": "Enrichment is disabled."},
+                "aircraft": {"available": False, "reason": "Enrichment is disabled."}}
+    service = app.state.enrichment_service
+    return {"mode": collector.mode, "eta_uncertainty_fraction":float(CONFIG["enrichment"]["eta_uncertainty_fraction"]),
+            **await service.info(callsign=state.get("callsign") or "", icao24=state["icao24"])}
 
 
 @app.get("/api/pairs")
@@ -425,6 +493,22 @@ async def approaches():
             "recorded_tracks": await asyncio.to_thread(app.state.approach_store.query, collector.mode)}
 
 
+@app.get("/api/airport-activity")
+async def airport_activity(mode: str | None = None, start: float | None = None, end: float | None = None,
+                           limit: int = Query(default=500, ge=1, le=2000)):
+    collector=app.state.active_collector
+    selected_mode=(mode or collector.mode).upper()
+    if selected_mode not in {"LIVE","REPLAY","ALL"}:
+        raise HTTPException(422,"mode must be LIVE, REPLAY, or ALL")
+    modes=("LIVE","REPLAY") if selected_mode=="ALL" else (selected_mode,)
+    records=[]
+    for value in modes:
+        records.extend(await asyncio.to_thread(app.state.activity_store.query,value,start,end,limit))
+    records.sort(key=lambda item:item["time_ts"],reverse=True)
+    return {"mode":selected_mode,"activities":records[:limit],"observed_ground_tracking_available":False,
+            "note":"Airport activity records marked inferred are estimates at the last observed ADS-B position; no ground position is created."}
+
+
 @app.get("/api/runway-status")
 async def runway_status():
     collector = app.state.active_collector
@@ -479,6 +563,22 @@ async def airport_frequencies():
     return {"airport": CENTER.icao, **estimate_facility_roles(data, settings.get("departure_fallback_type", "APP"))}
 
 
+@app.get("/api/radio-estimates")
+async def radio_estimates():
+    collector = app.state.active_collector
+    settings = CONFIG["frequencies"]
+    try:
+        data = await asyncio.to_thread(load_frequencies, airport_ident=CENTER.icao,
+            data_path=ROOT / settings["data_file"], override_path=ROOT / settings["override_file"])
+    except FileNotFoundError as error:
+        raise HTTPException(503, str(error)) from error
+    frequency_data = estimate_facility_roles(data, settings.get("departure_fallback_type", "APP"))
+    states = collector.manager.snapshot(collector.clock.now())
+    result = estimate_aircraft_facilities(states, collector.current_approaches,
+        frequency_data, CONFIG["radio_estimate"])
+    return {"airport": CENTER.icao, "mode": collector.mode, **result}
+
+
 @app.get("/api/reference/airports/{code}")
 async def airport_reference_lookup(code: str):
     settings = CONFIG["airport_reference"]
@@ -517,9 +617,11 @@ async def runway_coverage_summary():
 @app.get("/api/replay/status")
 async def replay_status():
     source = app.state.replay_source
+    session_id = None if source is None or not source._times else f"{source._times[0]:.3f}"
     return {"mode": app.state.active_collector.mode, "running": source is not None,
             "completed_cycles": 0 if source is None else source._index,
-            "total_cycles": 0 if source is None else source.total_cycles}
+            "total_cycles": 0 if source is None else source.total_cycles,
+            "summary_job": None if session_id is None else await asyncio.to_thread(app.state.replay_summary_store.job, session_id)}
 
 
 @app.get("/api/replay/sessions")
@@ -569,7 +671,15 @@ async def replay_cycles(start: float, end: float, limit: int = Query(default=200
                     "pairs":None,"alerts_opened":None})
             return result,total
     cycles,total=await asyncio.to_thread(read_cycles)
-    return {"cycles":cycles,"limit":limit,"offset":offset,"total":total,"note":"Pairs and alert counts are unavailable because cycle-specific derived records are not stored."}
+    summaries,_=await asyncio.to_thread(app.state.replay_summary_store.query,start,end,limit,offset)
+    by_time={item["time"]:item for item in summaries}
+    for item in cycles:
+        derived=by_time.get(item["time"])
+        if derived:
+            item.update(derived)
+    return {"cycles":cycles,"limit":limit,"offset":offset,"total":total,
+            "derived_summary_cached":bool(summaries),
+            "note":"Pair and alert summaries are populated as the selected recorded range is processed through replay."}
 
 
 @app.post("/api/replay/start")
@@ -588,6 +698,9 @@ async def replay_start(request: ReplayRequest):
     clock = ReplayClock()
     collector = make_collector(None, clock=clock, mode="REPLAY", source=source, on_publish=push_active)
     app.state.replay_source, app.state.replay_collector = source, collector
+    session_id = f"{source._times[0]:.3f}"
+    await asyncio.to_thread(app.state.replay_summary_store.begin, session_id, source._times[0], source._times[-1],
+                            source.total_cycles, source._times[0])
     app.state.replay_task = asyncio.create_task(run_replay(source, collector, clock, speed))
     activate(collector)
     return {"mode": "REPLAY", "status": "started", "speed": speed,
