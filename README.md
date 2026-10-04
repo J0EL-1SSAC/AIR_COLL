@@ -26,15 +26,24 @@ The running application uses real OpenSky data only. It never substitutes demo a
 - Live VOMM METAR and TAF retrieval through the AviationWeather.gov Data API, with provider/observation timestamps and explicit unavailable, stale, or degraded states. No forecast or weather fallback is generated locally.
 - Bright side-tab dashboard for Overview, Aircraft, Approaches, Alerts, Replay, and Radio, using CARTO Voyager by default with OpenStreetMap and CARTO Dark Matter alternatives.
 - ADS-B event history defaults to the current pipeline mode, supports LIVE/REPLAY/ALL filtering, and explains empty results with per-mode database counts.
-- Selected-aircraft map popup, last-seen selection state, facility estimate counts, and clearly labeled inferred activity at last observed positions.
+- Selected-aircraft map card, prioritized background aircraft-reference lookups, exact-ICAO24 radio aircraft rows, last-seen selection state, facility estimates, and clearly labeled inferred activity at last observed positions.
 
 Runway occupancy is experimental and not validated by the current coverage record; runway conflict alerts remain future work. Runway geometry, frequencies and coverage are research aids and require verification against official charts.
 
+
+### Phase 10.1: reference enrichment, live weather and replay controls
+
+`GET /api/aircraft/{icao24}/info` enriches selected aircraft, while a background queue also looks up airborne aircraft in the configured radius. Airline, route, type, registration and photo are external reference values, not ADS-B observations. Route records may be stale or wrong; unavailable values remain Unknown. adsbdb payloads stay in memory only (SQLite records metadata only). Photo URLs are hotlinked and never downloaded; the adsbdb README credits airport-data.com for photos, but does not publish a general photo license.
+
+The checked-in `data/airlines_override.yaml` is a small text-only prefix reference. Confirm current prefix usage before treating it as authoritative; in particular recheck AKJ and the historical sources for AXB/IGO/SEJ. To inspect real responses and parsing reasons, run `python scripts/diagnose_enrichment.py --recent 10` (or pass an actual callsign and ICAO24 from your feed). The `--recent` option reads recorded callsigns from `raw_states`. Run `python scripts/diagnose_weather.py` to print the live NOAA request outcome, response and decoded VOMM METAR.
+
+Radio estimates show the individual aircraft identified by ICAO24. Facility totals and aircraft assignments remain rule-based estimates, never radio observations. Airport activity remains explicitly inferred and is updated through the configured UI refresh interval. The replay panel provides play/pause, cycle stepping, speed, seeking and a rebuildable derived-summary job; a backward step or scrub starts a new replay at the selected recorded cycle, so state history before that point is not reconstructed. Raw observations are read-only during replay.
+
 ### Live weather and airport frequencies
 
-The Overview panel shows VOMM's current METAR and TAF from [AviationWeather.gov's Data API](https://aviationweather.gov/data/api/), including the provider report text, product timestamps, retrieval time, and age. METAR requests refresh at the configured `weather.refresh_interval_s` (default 60 seconds); TAF requests refresh at `weather.taf_refresh_interval_s` (default 600 seconds). If a report is absent, the provider request fails, or a report exceeds the configured freshness limit, the display says it is unavailable, degraded, or stale. Weather has no fabricated fallback. Public aviation weather reports can themselves lag the actual conditions.
+The dashboard header weather chip and Weather tab show VOMM's current METAR and TAF from [AviationWeather.gov's Data API](https://aviationweather.gov/data/api/), including the provider report text, product timestamps, retrieval time, and age. METAR and TAF requests refresh at their configured intervals (both default 600 seconds). The NOAA request cadence is intentionally slower than one request per minute per endpoint. If a report is absent, the provider request fails, or a report exceeds the configured freshness limit, the display says it is unavailable, degraded, or stale. Weather has no fabricated fallback. Public aviation weather reports can themselves lag the actual conditions.
 
-Weather API contract: `GET /api/weather` returns overall status (`CHECKING`, `OK`, `DEGRADED`, or `NO_DATA`) and separate `metar` and `taf` products, each with `status`, `report`, `error`, fetch time and age. METAR/TAF reports are provider records; missing reports are `null`. Provider: AviationWeather.gov; its API is queried by ICAO station identifier. `config.yaml` contains the URLs, intervals, request timeout, report age limit and User-Agent. No additional dependency is needed (the project already uses httpx).
+Weather API contract: `GET /api/weather` returns overall status (`CHECKING`, `OK`, `DEGRADED`, or `NO_DATA`) and separate `metar` and `taf` products, each with `status`, `report`, `error`, fetch time and age. METAR/TAF reports are provider records; missing reports are `null`. Provider: AviationWeather.gov; its API is queried by ICAO station identifier. Flight category is computed from visibility and the lowest BKN/OVC/VV ceiling. Runway wind components assume METAR direction is true and use runway true headings; they are reference-only estimates. `config.yaml` contains the URLs, intervals, request timeout, report age limit and User-Agent. No additional dependency is needed (the project already uses httpx).
 
 The Overview panel also shows the locally supplied OurAirports frequency records and labels them as reference data. Frequencies are not live transmissions and must be verified against the official AIP; a missing local CSV is displayed as unavailable.
 
@@ -42,7 +51,7 @@ The Overview panel also shows the locally supplied OurAirports frequency records
 
 The Radio tab reads VOMM frequency rows from `data/airport-frequencies.csv`; the estimates for ground, tower, approach, and area-control facilities are rule-based and are not radio observations. There is no live ATC audio in this prototype. Streaming ATC audio may be restricted by local law; this README does not assess legal requirements.
 
-Selected airborne aircraft may be looked up at [adsbdb](https://github.com/FugginOld/adsb-db/blob/main/README.md) for airline, aircraft type, and reported callsign route. The UI labels the route as a callsign-database report because callsigns can be reused and route records can be outdated. adsbdb's README credits PlaneBase for aircraft data and David Taylor and Jim Mason for route data; it says route data may not be incorporated into other databases without David Taylor's permission. Its public materials do not state a general API license. AIR_COL therefore stores only lookup metadata in `enrichment_cache`; response payloads remain in memory and are not persisted. Airline fallback from OpenFlights `data/airlines.dat` is optional. Airport names/codes are resolved from the local OurAirports reference when available. The map's estimated route is a great-circle line to a reported destination, never an actual or filed flight path.
+Airborne aircraft inside the configured radius are queued for prioritized background lookup at [adsbdb](https://github.com/FugginOld/adsb-db/blob/main/README.md) for airline, aircraft type, and reported callsign route. The UI labels the route as a callsign-database report because callsigns can be reused and route records can be outdated. adsbdb's README credits PlaneBase for aircraft data and David Taylor and Jim Mason for route data; it says route data may not be incorporated into other databases without David Taylor's permission. Its public materials do not state a general API license. AIR_COL therefore stores only lookup metadata in `enrichment_cache`; response payloads remain in memory and are not persisted. Airline fallback from OpenFlights `data/airlines.dat` is optional. Airport names/codes are resolved from the local OurAirports reference when available. The map's estimated route is a great-circle line to a reported destination, never an actual or filed flight path.
 
 Run an opt-in reference hit-rate check against the recorded callsigns (requires internet access):
 
@@ -205,6 +214,10 @@ Optional UTC bounds use `--start 2026-10-03T10:00:00Z --end 2026-10-03T11:00:00Z
 - `GET /api/radio-estimates` — current rule-based likely-facility estimates and aircraft counts, explicitly not radio observations.
 - `GET /api/airport-activity` — stored LIVE/REPLAY inferred airport activity; `mode=ALL` combines tagged records.
 - `GET /api/events/{event_id}` — complete event details and state snapshots.
+- `GET /api/data-range` — earliest/latest recorded timestamps and current epoch time for bounded date/time controls.
+- `GET /api/enrichment/current` — cached/pending/unknown status per current aircraft; reference payloads remain in memory only.
+- `POST /api/replay/pause`, `/resume`, `/step?direction=-1|1`, `/speed?speed=...`, `/seek?timestamp=...` — replay transport. Backward seek restarts at that cycle; earlier state history is not rebuilt.
+- `POST /api/replay/summaries/rebuild?start=...&end=...` — headless replay pipeline over a recorded range; progress is available from `/api/replay/status?session_id=...`.
 - `GET /api/coverage` — recorded coverage summaries.
 - `GET /api/runways` — runway metadata and core, buffer, centerline, and approach-corridor GeoJSON in longitude/latitude order; returns an actionable error if the runway file is missing.
 - `GET /api/frequencies` — local frequency records and clearly labeled facility estimates when DEP/CLR entries are absent.
@@ -255,11 +268,12 @@ source .venv/bin/activate
 python -m pytest -q
 python -m compileall -q backend tests scripts
 npm --prefix frontend run build
+npm --prefix frontend run test:unit
 ```
 
 Tests use isolated numeric inputs and temporary databases; test records are not imported by the running application.
 
-Replay-derived cycle rows appear only after the selected recording is processed through replay. Pair and opened-alert counts are derived from the same replay pipeline. Pause, cycle stepping, and a scrubber are not available yet.
+Replay-derived cycle rows appear only after the selected recording is processed through replay. Pair and opened-alert counts are derived from the same replay pipeline. Replay transport now supports pause/resume, speed, cycle stepping and timestamp seeking. The backward-step/scrub operation starts a new replay from that cycle, so earlier in-memory history is not reconstructed. A separate headless rebuild job recomputes derived per-cycle summaries from recorded observations.
 
 ## Limitations
 
