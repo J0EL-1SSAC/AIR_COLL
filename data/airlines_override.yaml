@@ -1,0 +1,23 @@
+# ICAO airline designators for display only; verify against the current operator.
+# Callsigns can be reused, leased or changed, so this prefix does not identify an aircraft.
+airlines:
+  IGO:
+    name: IndiGo
+    source: https://www.flightradar24.com/data/airlines/6e-igo
+    verification: Check the ICAO airline designator before relying on this display label.
+  AXB:
+    name: Air India Express
+    source: https://www.icao.int/environmental-protection/CORSIA/Documents/CORSIA%20Aeroplane%20Operator%20to%20State%20Attributions_Sep2019_for%20web.pdf
+    verification: Verify current operator/callsign use; the cited ICAO document is historical.
+  AIC:
+    name: Air India
+    source: https://old.icegate.gov.in/Download/airline_data.pdf
+    verification: Verify this current designator and callsign against the operator.
+  SEJ:
+    name: SpiceJet
+    source: https://www.icao.int/environmental-protection/CORSIA/Documents/CORSIA%20Aeroplane%20Operator%20to%20State%20Attributions_Sep2019_for%20web.pdf
+    verification: Verify current operator/callsign use; the cited ICAO document is historical.
+  AKJ:
+    name: Akasa Air
+    source: https://www.flightradar24.com/data/airlines/qp-akj
+    verification: Double-check this designator against a current ICAO or DGCA source.

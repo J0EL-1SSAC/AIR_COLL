@@ -66,3 +66,43 @@ def test_failed_lookup_is_negative_cached_in_memory_backoff(tmp_path):
             assert db.execute("SELECT COUNT(*) FROM enrichment_cache WHERE negative_cache=1").fetchone()[0]==2
         await client.aclose()
     asyncio.run(run())
+
+
+def test_parses_aircraft_photo_operator_type_and_non_record_response(tmp_path):
+    parsed=EnrichmentService._parse("aircraft",{"response":{"aircraft":{"registration":"VT-X","manufacturer":"Airbus","type":"A320neo","icao_type":"A20N","registered_owner":"Operator","url_photo_thumbnail":"https://photos.example/img.jpg"}}})
+    assert parsed["photo_url"].endswith("img.jpg")
+    assert parsed["operator"]=="Operator"
+    assert parsed["icao_type"]=="A20N"
+    assert EnrichmentService._parse("callsign",{"response":"unknown callsign"})["available"] is False
+
+
+def test_airline_override_layers_are_explicit(tmp_path):
+    data=tmp_path/"airlines.yaml"
+    data.write_text("airlines:\n  IGO:\n    name: IndiGo\n    source: test source\n")
+    service=object.__new__(EnrichmentService)
+    service.settings={"airlines_override_file":str(data),"airlines_file":str(tmp_path/"missing.dat")}
+    assert service._airline_fallback("igo")=={"name":"IndiGo","source":"test source"}
+    assert service._airline_fallback("ZZZ") is None
+
+
+def test_enrichment_queue_priority_is_selected_then_approach_then_other():
+    assert EnrichmentService.queue_priority(selected=True,approaching_or_departing=False)==0
+    assert EnrichmentService.queue_priority(selected=False,approaching_or_departing=True)==1
+    assert EnrichmentService.queue_priority(selected=False,approaching_or_departing=False)==2
+
+
+def test_rate_limit_waits_until_configured_window_has_room(tmp_path, monkeypatch):
+    async def run():
+        clock=[5.0]; slept=[]
+        async def fake_sleep(seconds):
+            slept.append(seconds);clock[0]+=seconds
+        monkeypatch.setattr("backend.airwatch.enrichment.asyncio.sleep",fake_sleep)
+        service=object.__new__(EnrichmentService)
+        import asyncio
+        service._lock=asyncio.Lock();service._request_times=[0.0]
+        service._monotonic=lambda:clock[0]
+        service.settings={"rate_window_s":10,"max_requests_per_window":1}
+        await service._rate_limit()
+        assert slept==[5.0]
+        assert service._request_times==[10.0]
+    asyncio.run(run())

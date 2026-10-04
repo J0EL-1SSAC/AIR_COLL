@@ -16,7 +16,7 @@ function isReducedQuality(aircraft) {
   return aircraft.quality_flags?.includes('LOW_QUALITY') || aircraft.quality_flags?.includes('stale_position');
 }
 
-function AircraftIcon({aircraft, selected, labelMode, bands, zoom, labelZoom, labelAllowed, nearAirport, alertRisk, children}) {
+function AircraftIcon({aircraft, selected, labelMode, bands, zoom, labelZoom, labelAllowed, nearAirport, alertRisk, reference, children}) {
   const [hovered, setHovered] = useState(false);
   const band = altitudeBand(aircraft, bands);
   const reduced = isReducedQuality(aircraft);
@@ -30,12 +30,14 @@ function AircraftIcon({aircraft, selected, labelMode, bands, zoom, labelZoom, la
   }), [aircraft.icao24, aircraft.track_deg, band, reduced, selected, shape, alertRisk]);
   const labelVisible = labelMode !== 'off' && (selected || hovered || (zoom >= labelZoom && labelAllowed)) && (!nearAirport || selected || hovered);
   const showDetails = labelMode === 'detailed' && (selected || hovered);
+  const referenceInfo=reference?.info;
   const altitudeFt = aircraft.baro_altitude_m == null ? null : aircraft.baro_altitude_m / DISTANCE_FORMAT.metersPerFoot;
   const speedKt = aircraft.velocity_mps == null ? null : aircraft.velocity_mps * DISTANCE_FORMAT.metersPerSecondToKnots;
   return <Marker position={[aircraft.latitude,aircraft.longitude]} icon={icon}
     eventHandlers={{click:aircraft.onSelect,mouseover:()=>setHovered(true),mouseout:()=>setHovered(false)}}>
     {labelVisible && aircraft.callsign && <Tooltip permanent direction="right" offset={[12,0]}>
       <span className="map-callsign">{aircraft.callsign.trim()}</span>
+      {showDetails&&<span className="map-detail">{referenceInfo?.airline||'Airline unknown'} · {referenceInfo?.aircraft?.icao_type||referenceInfo?.aircraft?.type||'Type unknown'}</span>}
       {showDetails && <span className="map-detail">{altitudeFt==null?'—':`${Math.round(altitudeFt)} ft`} · {speedKt==null?'—':`${Math.round(speedKt)} kt`}</span>}
     </Tooltip>}
     {children}
@@ -202,7 +204,9 @@ function MapSizeHandler(){
 export default function MapView({airport,runways=[],aircraft,predictions,pairs,activeAlerts=[],focusedEventId,selectedId,highlightedIds=[],selectedAircraft,selectedIsReporting=true,followAircraft=true,onFollowAircraft=()=>{},airportActivity=[],nowMs=Date.now(),mode='LIVE',onSelect,onSelectRunway=()=>{},focusPair,onFocusPair,layers,labelMode,basemap,onTileFailure,mapNotice}) {
   aircraft=[...new Map(aircraft.map(state=>[state.icao24,state])).values()];
   const [enrichment,setEnrichment]=useState(null);
+  const [backgroundEnrichment,setBackgroundEnrichment]=useState({});
   const [currentApproaches,setCurrentApproaches]=useState([]);
+  useEffect(()=>{const keydown=event=>{if(event.key==='Escape'&&selectedId)onSelect(null);};window.addEventListener('keydown',keydown);return()=>window.removeEventListener('keydown',keydown);},[selectedId,onSelect]);
   useEffect(()=>{
     let stopped=false;
     const refresh=()=>fetch(`${import.meta.env.VITE_API_BASE||'http://localhost:8000'}/api/approaches`).then(r=>r.ok?r.json():null).then(data=>{if(!stopped)setCurrentApproaches(data?.approaches||[]);}).catch(()=>{if(!stopped)setCurrentApproaches([]);});
@@ -220,6 +224,7 @@ export default function MapView({airport,runways=[],aircraft,predictions,pairs,a
       .catch(()=>{if(!cancelled)setEnrichment({airline:'Unknown',route:{available:false,label:'Route unavailable',reason:'Reference lookup unavailable.'},aircraft:{available:false,reason:'Reference lookup unavailable.'}});});
     return()=>{cancelled=true;};
   },[selectedAircraft?.icao24,selectedAircraft?.callsign,selectedIsReporting]);
+  useEffect(()=>{let stopped=false;const refresh=()=>fetch(`${import.meta.env.VITE_API_BASE||'http://localhost:8000'}/api/enrichment/current`).then(r=>r.ok?r.json():null).then(data=>{if(!stopped)setBackgroundEnrichment(data?.aircraft||{});}).catch(()=>{});refresh();const timer=window.setInterval(refresh,10000);return()=>{stopped=true;window.clearInterval(timer);};},[mode,aircraft.length]);
   const bandColors = ALTITUDE_BANDS;
   const stateById = Object.fromEntries(aircraft.map(state=>[state.icao24,state]));
   const [zoom,setZoom] = useState(airport.map_zoom);
@@ -284,11 +289,11 @@ export default function MapView({airport,runways=[],aircraft,predictions,pairs,a
       {liveAlerts.map(event=><AlertLayer key={event.event_id} event={event} currentAircraft={stateById}
         focused={focusedEventId===event.event_id} onFocus={focusEvent}/>) }
       <AirportMarker airport={airport}/>
-      {layers.estimatedRoute&&selectedIsReporting&&enrichment?.route?.destination?.latitude!=null&&selectedAircraft?.latitude!=null&&<Polyline pane="predictions" positions={[[selectedAircraft.latitude,selectedAircraft.longitude],[enrichment.route.destination.latitude,enrichment.route.destination.longitude]]} pathOptions={{color:'var(--color-estimated-route)',weight:2,dashArray:'2 6',opacity:.9}}><Tooltip sticky>Estimated route to {enrichment.route.destination.icao_code||enrichment.route.destination.iata_code||enrichment.route.destination.ident} · great-circle, not actual or filed path</Tooltip></Polyline>}
+      {layers.estimatedRoute&&selectedIsReporting&&(enrichment?.route?.destination?.latitude??enrichment?.inferred_route?.destination?.latitude)!=null&&selectedAircraft?.latitude!=null&&<Polyline pane="predictions" positions={[[selectedAircraft.latitude,selectedAircraft.longitude],[(enrichment.route?.destination||enrichment.inferred_route.destination).latitude,(enrichment.route?.destination||enrichment.inferred_route.destination).longitude]]} pathOptions={{color:'var(--color-estimated-route)',weight:2,dashArray:'2 6',opacity:.9}}><Tooltip sticky>{enrichment.inferred_route?.destination&&!enrichment.route?.available?'Inferred destination VOMM · ':'Estimated route to '}{(enrichment.route?.destination||enrichment.inferred_route?.destination).icao_code||'destination'} · great-circle, not actual or filed path</Tooltip></Polyline>}
       {aircraft.map(state=><AircraftIcon key={state.icao24} aircraft={{...state,onSelect:()=>onSelect(state)}}
         selected={selectedId===state.icao24||highlightedIds.includes(state.icao24)} labelMode={labelMode} bands={airport.altitude_bands_m}
         zoom={zoom} labelZoom={labelZoom} labelAllowed={labelsAllowed.has(state.icao24)}
-        nearAirport={state.distance_nm!=null&&state.distance_nm<(airport.label_exclusion_nm??2)} alertRisk={alertLevels[state.icao24]}>
+        nearAirport={state.distance_nm!=null&&state.distance_nm<(airport.label_exclusion_nm??2)} alertRisk={alertLevels[state.icao24]} reference={backgroundEnrichment[state.icao24?.toUpperCase()]}>
         {selectedId===state.icao24&&<Popup className="aircraft-map-popup" closeButton autoPan offset={[20,-10]} eventHandlers={{remove:()=>onSelect(null)}}><AircraftMapCard aircraft={state} info={enrichment} followAircraft={followAircraft} onFollowAircraft={onFollowAircraft}/></Popup>}
       </AircraftIcon>)}
       {!selectedIsReporting&&selectedAircraft?.latitude!=null&&selectedAircraft?.longitude!=null&&<CircleMarker center={[selectedAircraft.latitude,selectedAircraft.longitude]} radius={11}
@@ -304,6 +309,7 @@ export default function MapView({airport,runways=[],aircraft,predictions,pairs,a
 }
 
 function AircraftMapCard({aircraft,info,isReporting=true,followAircraft=true,onFollowAircraft=()=>{}}) {
+  const [photoFailed,setPhotoFailed]=useState(false);
   const callsign=aircraft.callsign?.trim()||'Unknown callsign';
   const altitude=aircraft.geo_altitude_m??aircraft.baro_altitude_m;
   const route=info?.route;
@@ -313,11 +319,16 @@ function AircraftMapCard({aircraft,info,isReporting=true,followAircraft=true,onF
   const routeEta=routeDistanceM!=null&&Number(aircraft.velocity_mps)>0?routeDistanceM/Number(aircraft.velocity_mps):null;
   const etaMargin=Number(info?.eta_uncertainty_fraction??0.2);
   const airportLabel=value=>value?`${value.name||'Unknown airport'}, ${value.municipality||'Unknown city'} (${value.icao_code||value.ident||'Unknown ICAO'}${value.iata_code?` / ${value.iata_code}`:''})`:'Unknown · airport reference unavailable';
-  return <article className="aircraft-map-card"><header><h2>{callsign}</h2><strong>{info?.airline||'Unknown airline'}</strong><code>{aircraft.icao24}</code><label><input type="checkbox" checked={followAircraft} onChange={event=>onFollowAircraft(event.target.checked)}/> Follow aircraft</label></header>
-    <section><b>Reported route (callsign database)</b>{route?.available?<><span>From: {airportLabel(route.origin)}</span><span>To: {airportLabel(route.destination)}</span><span>{route.route_label} · source {route.source}</span>{routeDistanceM!=null&&<span>Estimated great-circle distance {(routeDistanceM/DISTANCE_FORMAT.metersPerNm).toFixed(1)} NM · not actual/filed path</span>}{routeEta!=null&&<span>Estimated ETA window {Math.round(routeEta*(1-etaMargin))}–{Math.round(routeEta*(1+etaMargin))} s based on current ground speed</span>}</>:<span>Route unavailable · {route?.reason||'Waiting for reference lookup.'}</span>}</section>
-    <section><b>Aircraft</b><span>{info?.aircraft?.type||'Unknown type'} · {info?.aircraft?.registration||'Unknown registration'}</span><span>Operator: {info?.aircraft?.operator||'Unknown'}</span></section>
+  const inferred=info?.inferred_route;
+  const photo=info?.aircraft?.photo_url;
+  const className=(info?.aircraft?.display_type||info?.aircraft?.type||'').toLowerCase();
+  const silhouette=className.includes('helicopter')?'helicopter':className.includes('turboprop')||className.includes('regional')?'regional':className.includes('business')?'business':className.includes('wide')||/a3[38]0|b7[47]7|b78/.test(className)?'wide-body':'narrow-body';
+  return <article className="aircraft-map-card"><div className="aircraft-photo">{photo&&!photoFailed?<img src={photo} alt={`${callsign} reference aircraft photo`} loading="lazy" onError={()=>setPhotoFailed(true)}/>:<><svg viewBox="0 0 160 70" role="img" aria-label={`${silhouette} aircraft silhouette`}><path d="M79 5 88 29l58 18v7l-58-8-5 17 13 4v4l-16-2-16 2v-4l13-4-5-17-58 8v-7l58-18z"/></svg><small>No photo available · silhouette: {silhouette}</small></>}</div><header><h2>{callsign}</h2><strong>{info?.airline||'Unknown airline'}</strong><span>{info?.aircraft?.display_type||info?.aircraft?.type||'Unknown type'}</span><code>{aircraft.icao24}</code><span>Registration: {info?.aircraft?.registration||'Unknown · not in reference data'}</span><label><input type="checkbox" checked={followAircraft} onChange={event=>onFollowAircraft(event.target.checked)}/> Follow aircraft</label></header>
+    <section><b>{route?.available?'Reported route (callsign database)':'Route'}</b>{route?.available?<><span>From: {airportLabel(route.origin)}</span><span>To: {airportLabel(route.destination)}</span><span>{route.route_label} · source {route.source||'adsbdb'} · age {info?.route_age_s==null?'unknown':`${Math.round(info.route_age_s)} s`}</span>{routeDistanceM!=null&&<span>Estimated great-circle distance {(routeDistanceM/DISTANCE_FORMAT.metersPerNm).toFixed(1)} NM · not actual/filed path</span>}{routeEta!=null&&<span>Estimated ETA window {Math.round(routeEta*(1-etaMargin))}–{Math.round(routeEta*(1+etaMargin))} s based on current ground speed</span>}</>:inferred?<><span>From: {inferred.origin?airportLabel(inferred.origin):'Unknown · no reported origin'}</span><span>To: {inferred.destination?airportLabel(inferred.destination):'Unknown · no reported destination'}</span><span className="inferred-label">Inferred from airport approach/departure evidence · {inferred.reason}</span></>:<span>Route unavailable · {route?.reason||'Waiting for reference lookup.'}</span>}{photo&&<a href={photo} target="_blank" rel="noreferrer">Photo: {info?.aircraft?.photo_attribution||'airport-data.com via adsbdb'}</a>}</section>
+    <section><b>Aircraft reference</b><span>{info?.aircraft?.manufacturer||'Unknown manufacturer'} · {info?.aircraft?.icao_type||'Unknown ICAO type'}</span><span>Operator: {info?.aircraft?.operator||'Unknown · not in reference data'}</span></section>
     <section><b>Live state</b><span>{altitude==null?'Unknown':`${Math.round(altitude/DISTANCE_FORMAT.metersPerFoot)} ft · ${Math.round(altitude)} m`}</span><span>{aircraft.velocity_mps==null?'Unknown':`${Math.round(aircraft.velocity_mps*DISTANCE_FORMAT.metersPerSecondToKnots)} kt`} · Track {aircraft.track_deg==null?'Unknown':`${Math.round(aircraft.track_deg)}°`}</span><span>Vertical rate {aircraft.vertical_rate_mps==null?'Unknown':`${Math.round(aircraft.vertical_rate_mps*UI.feetPerMinutePerMps)} ft/min`} · Age {Math.round(aircraft.age_s||0)} s</span><span>On ground: {aircraft.on_ground==null?'Unknown':aircraft.on_ground?'Yes':'No'} · Distance: {aircraft.distance_nm==null?'Unknown':`${aircraft.distance_nm.toFixed(1)} NM`}</span><span>Altitude basis: {aircraft.geo_altitude_m!=null?'Geometric':aircraft.baro_altitude_m!=null?'Barometric':'Unknown'} · Quality: {(aircraft.quality_flags||[]).join(', ')||'No flags reported'}</span></section>
-    <section><b>Phase of flight</b><span>Not classified</span></section><section><b>Runway and radio</b><span>Unknown · not a radio observation</span></section>
+    <section><b>Phase of flight</b><span>{info?.phase_of_flight||'Unknown · no current approach/departure classification'}</span>{info?.runway_end&&<span>Runway end: {info.runway_end}</span>}</section><section><b>Runway and radio</b><span>{info?.runway_end?`RWY ${info.runway_end}`:'Runway end unknown'}</span><span>{info?.likely_frequency?.facility_type||'Unknown'} · {(info?.likely_frequency?.frequencies||[]).map(item=>`${item.description} ${item.frequency_mhz} MHz`).join(', ')||'Frequency unavailable'} (estimate; not a radio observation)</span></section>
+    <section><b>Alerts</b><span>{info?.alerts?.length?`${info.alerts.length} active Potential Aircraft Conflict event(s)`:'No active alert involvement reported'}</span></section>
     {!isReporting&&<section><b>Last seen</b><span>Aircraft no longer reporting. Last seen at {Number(aircraft.latitude).toFixed(5)}, {Number(aircraft.longitude).toFixed(5)}.</span></section>}
-    <section><b>Source</b><span>Live state: ADS-B · aircraft/route reference: adsbdb. Route may be outdated or incorrect.</span><span>adsbdb credits PlaneBase, David Taylor and Jim Mason; route data is not stored in SQLite.</span></section></article>;
+    <section><b>Source</b><span>Live state: ADS-B · aircraft/route reference: adsbdb. Route may be outdated or incorrect.</span><span>adsbdb credits PlaneBase, David Taylor and Jim Mason; aircraft photos credit airport-data.com. Reference responses remain in memory only.</span></section></article>;
 }
