@@ -158,10 +158,11 @@ runways:
   override_file: data/runways_override.yaml
   include_closed: false
   default_width_m: 45
-  # Look up current magnetic variation for VOMM and the chart/data effective date; 0.0 is ignored while unconfirmed.
+  # User-supplied Chennai WMM2025 declination, checked 2026-10-04: -1°4' = -1.0666667° (west).
+  # Recheck against the effective official AIP/aerodrome chart before operational interpretation.
   # East variation is positive; true heading = magnetic heading + variation.
-  magnetic_variation_deg: 0.0
-  magnetic_variation_confirmed: false
+  magnetic_variation_deg: -1.0666667
+  magnetic_variation_confirmed: true
   heading_tolerance_deg: 12
   max_threshold_distance_from_airport_m: 12000
   length_tolerance_m: 150
