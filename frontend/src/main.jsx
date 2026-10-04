@@ -4,15 +4,13 @@ import 'leaflet/dist/leaflet.css';
 import './style.css';
 import {UI} from './config';
 import DashboardHeader from './components/DashboardHeader';
-import FiltersPanel from './components/FiltersPanel';
-import DetailsPanel from './components/DetailsPanel';
 import MapView from './components/MapView';
-import BottomPanel from './components/BottomPanel';
+import ResearchSidePanel from './components/ResearchSidePanel';
 
 const apiBase=import.meta.env.VITE_API_BASE||'http://localhost:8000';
 const wsUrl=apiBase.replace(/^http/,'ws')+'/ws/live';
 const defaultLayers={trails:true,predictions:true,uncertainty:true,closestApproaches:true,radius:true,runways:true,runwayBuffer:false,approachCorridors:false};
-const storedBasemap=()=>{try{return localStorage.getItem('aircol-basemap')==='light'?'light':'dark';}catch{return 'dark';}};
+const storedBasemap=()=>{try{const value=localStorage.getItem('aircol-basemap');return ['dark','osm'].includes(value)?value:'light';}catch{return 'light';}};
 
 function App(){
   const [airport,setAirport]=useState(null);
@@ -28,7 +26,8 @@ function App(){
   const [selectedEvent,setSelectedEvent]=useState(null);
   const [alertRefresh,setAlertRefresh]=useState(0);
   const [alertsLoading,setAlertsLoading]=useState(false);
-  const [alertFilters,setAlertFilters]=useState({risk:'',status:'RESOLVED',mode:'LIVE',start:'',end:''});
+  const [alertFilters,setAlertFilters]=useState({risk:'',status:'',mode:'LIVE',start:'',end:''});
+  const [alertView,setAlertView]=useState('active');
   const [focusedEventId,setFocusedEventId]=useState(null);
   const [pairThresholds,setPairThresholds]=useState({near_nm:1.5,amber_nm:3});
   const [status,setStatus]=useState('CONNECTING');
@@ -158,17 +157,19 @@ function App(){
   function updateLayer(name,value){setMapLayers(current=>({...current,[name]:value}));}
   function changeBasemap(value){setBasemap(value);setMapNotice('');try{localStorage.setItem('aircol-basemap',value);}catch{}}
   function tileFailure(){
-    if(basemap==='dark'){
-      setBasemap('light');setMapNotice('Dark tiles could not load. Switched to OpenStreetMap light tiles.');
-      try{localStorage.setItem('aircol-basemap','light');}catch{}
+    if(basemap!=='osm'){
+      setBasemap('osm');setMapNotice('Selected map tiles could not load. Switched to OpenStreetMap.');
+      try{localStorage.setItem('aircol-basemap','osm');}catch{}
+    } else {
+      setMapNotice('OpenStreetMap tiles could not load. Map tiles require internet access; aircraft data status is independent.');
     }
   }
-  async function startReplay(){
+  async function startReplay(session=null,chosenStart=null,speed=null){
     setReplayBusy(true);
     try{
-      const response=await fetch(`${apiBase}/api/replay/start`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({speed:Number(replaySpeed??airport.replay.default_speed)})});
+      const response=await fetch(`${apiBase}/api/replay/start`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({start_time:chosenStart??session?.start_time,end_time:session?.end_time,speed:Number(speed??replaySpeed??airport.replay.default_speed)})});
       const body=await response.json();if(!response.ok)throw new Error(body.detail||`Replay request failed (${response.status}).`);
-      setReplayMessage(`Replaying ${body.cycles} recorded polls at ${body.speed}×.`);
+      setReplayMessage(`Replaying ${body.cycles} recorded polls from the selected session at ${body.speed}×.`);
     }catch(error){setReplayMessage(`Replay unavailable: ${error.message}`);}
     finally{setReplayBusy(false);}
   }
@@ -194,26 +195,27 @@ function App(){
   if(!airport)return <main className="loading-screen"><h1>AIR_COL</h1><div className="skeleton"/><div className="skeleton"/><p>{message}</p>
     <p className="disclaimer">Research prototype. Not ATC, TCAS/ACAS or a certified safety system. Public ADS-B may be delayed, incomplete or inaccurate, especially at low altitude and on the ground.</p></main>;
 
-  const workspaceClass=['workspace',leftCollapsed?'left-hidden':'',rightCollapsed?'right-hidden':'',leftCollapsed&&rightCollapsed?'both-hidden':''].filter(Boolean).join(' ');
-  const replay={speed:replaySpeed??airport.replay.default_speed,onSpeed:setReplaySpeed,onStart:startReplay,onStop:stopReplay,busy:replayBusy,mode,message:replayMessage};
   return <main className="app-shell">
     <DashboardHeader airport={airport} mode={mode} status={status} message={message} utcNow={utcNow}
       alertCounts={activeAlerts.reduce((counts,item)=>({...counts,[item.current_risk]:(counts[item.current_risk]||0)+1}),{})}
       riskProfile={riskConfig?.active_profile}
       lastUpdateAge={lastUpdateAge} onToggleLeft={()=>setLeftCollapsed(value=>!value)} onToggleRight={()=>setRightCollapsed(value=>!value)}/>
-    <div className={workspaceClass}>
-      {!leftCollapsed&&<FiltersPanel airport={airport} counts={counts} predictionCounts={predictionCounts} mapLayers={mapLayers} runwayMessage={runwayMessage}
+    <div className="operations-layout">
+      {!leftCollapsed&&<ResearchSidePanel airport={airport} counts={counts} predictionCounts={predictionCounts} mapLayers={mapLayers} runwayMessage={runwayMessage}
         onLayerChange={updateLayer} labelMode={labelMode} onLabelMode={setLabelMode} basemap={basemap} onBasemap={changeBasemap}
-        groundOnly={groundOnly} onGroundOnly={setGroundOnly}/>}
+        groundOnly={groundOnly} onGroundOnly={setGroundOnly} aircraft={visibleAircraft} selectedAircraft={selectedAircraft}
+        selectedPrediction={selectedAircraft?predictions[selectedAircraft.icao24]:null} pairs={pairs} thresholds={pairThresholds}
+        onSelectAircraft={state=>setSelectedId(state.icao24)} onSelectId={setSelectedId} onFocusPair={focusPair}
+        alerts={activeAlerts} history={eventHistory} riskProfile={riskConfig?.active_profile} mode={mode} alertFilters={alertFilters}
+        selectedEvent={selectedEvent}
+        onAlertFilterChange={updateAlertFilter} onFocusAlert={event=>focusAlert(event,false)} onInspectEvent={event=>focusAlert(event,true)}
+        alertsLoading={alertsLoading} alertView={alertView} setAlertView={setAlertView} replaySpeed={replaySpeed??airport.replay.default_speed}
+        onStartReplay={startReplay} onStopReplay={stopReplay} onCollapse={()=>setLeftCollapsed(true)}/>}
       <MapView airport={airport} runways={runways} aircraft={visibleAircraft} predictions={predictions} pairs={pairs}
         activeAlerts={activeAlerts} focusedEventId={focusedEventId}
         selectedId={selectedId} onSelect={state=>{setSelectedRunway(null);setSelectedId(state.icao24);}} onSelectRunway={runway=>{setSelectedId(null);setSelectedEvent(null);setSelectedRunway(runway);}} focusPair={focusedPair}
         onFocusPair={focusPair} layers={mapLayers} labelMode={labelMode} basemap={basemap} onTileFailure={tileFailure} mapNotice={mapNotice}/>
-      {!rightCollapsed&&<DetailsPanel aircraft={selectedRunway?null:selectedAircraft} prediction={selectedAircraft?predictions[selectedAircraft.icao24]:null} event={selectedEvent} runway={selectedRunway}/>}
     </div>
-    <BottomPanel pairs={pairs} thresholds={pairThresholds} replaySettings={airport.replay} replay={replay} onFocusPair={focusPair}
-      alerts={activeAlerts} history={eventHistory} riskProfile={riskConfig?.active_profile} mode={mode} alertFilters={alertFilters}
-      onAlertFilterChange={updateAlertFilter} onFocusAlert={event=>focusAlert(event,false)} onInspectEvent={event=>focusAlert(event,true)} alertsLoading={alertsLoading}/>
     <footer className="disclaimer">Research prototype. Not ATC, TCAS/ACAS or a certified safety system. Public ADS-B data can be delayed, incomplete or inaccurate, especially at low altitude and on the ground.{pairsError&&<span> · Pair data unavailable.</span>}{predictionError&&<span> · Prediction data unavailable.</span>}</footer>
   </main>;
 }
