@@ -52,8 +52,13 @@ def estimate_controlling_facility(state: Mapping, approaches: list[Mapping], fre
 def estimate_aircraft_facilities(states: list[Mapping], approaches: list[Mapping],
                                  frequency_data: Mapping, settings: Mapping) -> dict:
     frequencies = frequency_data.get("facilities", {})
-    estimates = {state["icao24"]: estimate_controlling_facility(state, approaches, frequencies, settings)
-                 for state in states}
+    estimates = {}
+    for state in states:
+        estimate = estimate_controlling_facility(state, approaches, frequencies, settings)
+        estimate["state"] = {key: state.get(key) for key in
+            ("icao24", "callsign", "altitude_ft", "baro_altitude_m", "geo_altitude_m",
+             "velocity_mps", "track_deg", "vertical_rate_mps", "on_ground", "age_s")}
+        estimates[state["icao24"]] = estimate
     counts: dict[str, int] = {}
     for value in estimates.values():
         facility = value["facility_type"]

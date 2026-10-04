@@ -6,6 +6,7 @@ import {UI} from './config';
 import DashboardHeader from './components/DashboardHeader';
 import MapView from './components/MapView';
 import ResearchSidePanel from './components/ResearchSidePanel';
+import {validateDateRange,dateTimeLocalToEpoch} from './dateRange';
 
 const apiBase=import.meta.env.VITE_API_BASE||'http://localhost:8000';
 const wsUrl=apiBase.replace(/^http/,'ws')+'/ws/live';
@@ -27,11 +28,15 @@ function App(){
   const [weather,setWeather]=useState(null);
   const [frequencyData,setFrequencyData]=useState(null);
   const [airportActivity,setAirportActivity]=useState([]);
+  const [airportActivityLastUpdate,setAirportActivityLastUpdate]=useState(null);
+  const [airportActivityLastHourCount,setAirportActivityLastHourCount]=useState(0);
+  const [dateBounds,setDateBounds]=useState({now_ts:Date.now()/1000,earliest_ts:null,latest_ts:null});
   const [selectedEvent,setSelectedEvent]=useState(null);
   const [alertRefresh,setAlertRefresh]=useState(0);
   const [alertsLoading,setAlertsLoading]=useState(false);
-  const [alertFilters,setAlertFilters]=useState({risk:'',status:'',mode:'CURRENT',range:'24h',start:'',end:''});
+  const [alertFilters,setAlertFilters]=useState({risk:'',status:'',mode:'CURRENT',range:'24h',start:'',end:'',dateZone:'IST'});
   const [historyMessage,setHistoryMessage]=useState('');
+  const [historyTotal,setHistoryTotal]=useState(0);
   const [alertView,setAlertView]=useState('active');
   const [focusedEventId,setFocusedEventId]=useState(null);
   const [pairThresholds,setPairThresholds]=useState({near_nm:1.5,amber_nm:3});
@@ -85,6 +90,13 @@ function App(){
 
   useEffect(()=>{
     if(!airport)return undefined;
+    const refresh=()=>fetch(`${apiBase}/api/data-range`).then(r=>r.ok?r.json():null).then(data=>{if(data)setDateBounds(data);}).catch(()=>{});
+    refresh();const timer=window.setInterval(refresh,60000);
+    return()=>window.clearInterval(timer);
+  },[airport]);
+
+  useEffect(()=>{
+    if(!airport)return undefined;
     let stopped=false;
     const refresh=()=>fetch(`${apiBase}/api/weather`).then(response=>response.ok?response.json():Promise.reject(new Error('Weather service unavailable.')))
       .then(data=>{if(!stopped)setWeather(data);})
@@ -100,8 +112,8 @@ function App(){
     if(!airport)return undefined;
     let stopped=false;
     const refresh=()=>fetch(`${apiBase}/api/airport-activity?mode=${mode}&limit=30`).then(r=>r.ok?r.json():Promise.reject(new Error('Airport activity unavailable.')))
-      .then(data=>{if(!stopped)setAirportActivity(data.activities||[]);}).catch(()=>{if(!stopped)setAirportActivity([]);});
-    refresh();const timer=window.setInterval(refresh,15000);
+      .then(data=>{if(!stopped){setAirportActivity(data.activities||[]);setAirportActivityLastUpdate(Date.now());setAirportActivityLastHourCount(data.last_hour_count||0);}}).catch(()=>{if(!stopped)setAirportActivity([]);});
+    refresh();const timer=window.setInterval(refresh,(airport.airport_activity_refresh_interval_s||15)*1000);
     return()=>{stopped=true;window.clearInterval(timer);};
   },[airport,mode]);
 
@@ -168,24 +180,25 @@ function App(){
     if(alertFilters.risk)params.set('risk',alertFilters.risk);
     if(alertFilters.status)params.set('status',alertFilters.status);
     if(alertFilters.range==='custom'){
-      if(alertFilters.start)params.set('start',String(new Date(alertFilters.start).getTime()/1000));
-      if(alertFilters.end)params.set('end',String(new Date(alertFilters.end).getTime()/1000));
+      if(alertFilters.start)params.set('start',String(dateTimeLocalToEpoch(alertFilters.start,alertFilters.dateZone==='UTC'?'UTC':'Asia/Kolkata')));
+      if(alertFilters.end)params.set('end',String(dateTimeLocalToEpoch(alertFilters.end,alertFilters.dateZone==='UTC'?'UTC':'Asia/Kolkata')));
     } else if(alertFilters.range!=='all') {
       const hours=alertFilters.range==='1h'?1:alertFilters.range==='6h'?6:24;
       const endTime=mode==='REPLAY'?pipelineTimeSeconds:Date.now()/1000;
       params.set('start',String(endTime-hours*3600));
       params.set('end',String(endTime));
     }
+    const dateError=alertFilters.range==='custom'?validateDateRange(alertFilters.start,alertFilters.end,dateBounds.now_ts,dateBounds.earliest_ts,alertFilters.dateZone==='UTC'?'UTC':'Asia/Kolkata'):null;
     Promise.all([
       fetch(`${apiBase}/api/alerts/active?mode=${mode}`).then(r=>r.ok?r.json():Promise.reject(new Error('Active alerts unavailable.'))),
-      fetch(`${apiBase}/api/events?${params}`).then(r=>r.ok?r.json():Promise.reject(new Error('Event history unavailable.'))),
+      dateError?Promise.resolve({events:[],message:dateError,total_matching:0}):fetch(`${apiBase}/api/events?${params}`).then(r=>r.ok?r.json():Promise.reject(new Error('Event history unavailable.'))),
     ]).then(([active,history])=>{
       if(stopped)return;
-      setActiveAlerts(active.alerts||[]);setEventHistory(history.events||[]);setHistoryMessage(history.message||'');
-    }).catch(()=>{if(!stopped){setActiveAlerts([]);setEventHistory([]);}})
+      setActiveAlerts(active.alerts||[]);setEventHistory(history.events||[]);setHistoryMessage(history.message||'');setHistoryTotal(history.total_matching||0);
+    }).catch(error=>{if(!stopped){setActiveAlerts([]);setEventHistory([]);setHistoryMessage(error.message||'Alert history request failed.');setHistoryTotal(0);}})
       .finally(()=>{if(!stopped)setAlertsLoading(false);});
     return()=>{stopped=true;};
-  },[airport,mode,pipelineTimeSeconds,alertRefresh,alertFilters.risk,alertFilters.status,alertFilters.mode,alertFilters.range,alertFilters.start,alertFilters.end]);
+  },[airport,mode,pipelineTimeSeconds,alertRefresh,alertFilters.risk,alertFilters.status,alertFilters.mode,alertFilters.range,alertFilters.start,alertFilters.end,alertFilters.dateZone,dateBounds]);
 
   useEffect(()=>{
     if(!airport)return undefined;
@@ -251,13 +264,13 @@ function App(){
     setAlertFilters(current=>({...current,[key]:value}));
   }
   function selectAircraftId(id){setSelectedEvent(null);setFocusedEventId(null);setFocusedPair(null);setHighlightedIds([]);setSelectedId(id);}
-  function focusFacility(ids){setSelectedEvent(null);setFocusedPair(null);setFocusedEventId(null);setHighlightedIds(ids);if(ids[0])setSelectedId(ids[0]);}
+  function focusFacility(ids){setSelectedEvent(null);setFocusedPair(null);setFocusedEventId(null);setHighlightedIds(ids);}
 
   if(!airport)return <main className="loading-screen"><h1>AIR_COL</h1><div className="skeleton"/><div className="skeleton"/><p>{message}</p>
     <p className="disclaimer">Research prototype. Not ATC, TCAS/ACAS or a certified safety system. Public ADS-B may be delayed, incomplete or inaccurate, especially at low altitude and on the ground.</p></main>;
 
   return <main className="app-shell">
-    <DashboardHeader airport={airport} mode={mode} status={status} message={message} utcNow={utcNow}
+    <DashboardHeader airport={airport} mode={mode} status={status} message={message} utcNow={utcNow} weather={weather}
       alertCounts={activeAlerts.reduce((counts,item)=>({...counts,[item.current_risk]:(counts[item.current_risk]||0)+1}),{})}
       riskProfile={riskConfig?.active_profile}
       lastUpdateAge={lastUpdateAge} onToggleLeft={()=>setLeftCollapsed(value=>!value)} onToggleRight={()=>setRightCollapsed(value=>!value)}/>
@@ -267,7 +280,7 @@ function App(){
         groundOnly={groundOnly} onGroundOnly={setGroundOnly} aircraft={visibleAircraft} selectedAircraft={selectedAircraft}
         selectedPrediction={selectedAircraft?predictions[selectedAircraft.icao24]:null} pairs={pairs} thresholds={pairThresholds}
         onSelectAircraft={state=>selectAircraftId(state.icao24)} onSelectId={selectAircraftId} onFocusPair={focusPair}
-        alerts={activeAlerts} history={eventHistory} airportActivity={airportActivity} onFocusFacility={focusFacility} riskProfile={riskConfig?.active_profile} mode={mode} alertFilters={alertFilters}
+        alerts={activeAlerts} history={eventHistory} historyTotal={historyTotal} dateBounds={dateBounds} airportActivity={airportActivity} airportActivityLastUpdate={airportActivityLastUpdate} airportActivityLastHourCount={airportActivityLastHourCount} onFocusFacility={focusFacility} riskProfile={riskConfig?.active_profile} mode={mode} alertFilters={alertFilters}
         selectedEvent={selectedEvent}
     onAlertFilterChange={updateAlertFilter} historyMessage={historyMessage} onFocusAlert={event=>focusAlert(event,false)} onInspectEvent={event=>focusAlert(event,true)}
         alertsLoading={alertsLoading} alertView={alertView} setAlertView={setAlertView} replaySpeed={replaySpeed??airport.replay.default_speed}

@@ -60,3 +60,13 @@ def test_events_api_defaults_to_replay_when_pipeline_is_replaying(api_store, mon
     body = asyncio.run(get("/api/events")).json()
     assert body["mode"] == "REPLAY"
     assert [item["event_id"] for item in body["events"]] == ["replay-resolved"]
+
+
+def test_events_api_rejects_future_reversed_and_pre_recording_ranges(api_store):
+    import time
+    future=asyncio.run(get(f"/api/events?end={time.time()+3600}"))
+    reversed_range=asyncio.run(get("/api/events?start=2000&end=1000"))
+    before=asyncio.run(get("/api/events?start=1"))
+    assert future.status_code==422 and "future" in future.json()["detail"]
+    assert reversed_range.status_code==422 and "at or before" in reversed_range.json()["detail"]
+    assert before.status_code==422 and "recorded data range" in before.json()["detail"]

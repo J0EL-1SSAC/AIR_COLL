@@ -33,8 +33,9 @@ from ..airport_reference import AirportReferenceIndex
 from ..enrichment import EnrichmentService
 from ..activity_store import AirportActivityStore
 from ..airport_activity import infer_landing, infer_departure
-from ..weather import LiveWeatherService
+from ..weather import LiveWeatherService, runway_wind_components
 from ..replay_summary_store import ReplaySummaryStore
+from ..date_ranges import validate_time_range
 
 ROOT = Path(__file__).resolve().parents[3]
 CONFIG_PATH = Path(os.environ.get("AIR_COL_CONFIG", ROOT / "config.yaml"))
@@ -91,6 +92,22 @@ async def process_alert_cycle(collector: LiveCollector) -> None:
     states = collector.manager.snapshot(now, include_unpositioned=True)
     approaches = collector.approach_tracker.update(states, collector.runway_definitions, now)
     collector.current_approaches = approaches
+    enrichment = getattr(app.state, "enrichment_service", None)
+    if collector.mode == "LIVE" and enrichment is not None and CONFIG.get("enrichment", {}).get("enabled", False):
+        approach_ids = {item.get("icao24") for item in approaches if item.get("state") in
+                        {"CANDIDATE", "LIKELY_APPROACHING", "NEAR_THRESHOLD"}}
+        selected = getattr(app.state, "enrichment_selected_icao24", None)
+        for state in states:
+            if state.get("on_ground") is True or state.get("latitude") is None or state.get("longitude") is None:
+                continue
+            if state.get("distance_nm") is not None and state["distance_nm"] > float(AIRPORT["radius_nm"]):
+                continue
+            if not (state.get("callsign") or "").strip():
+                continue
+            enrichment.enqueue(callsign=state["callsign"], icao24=state["icao24"],
+                priority=enrichment.queue_priority(selected=state["icao24"].upper() == (selected or "").upper(),
+                    approaching_or_departing=state["icao24"] in approach_ids or
+                    float(state.get("vertical_rate_mps") or 0) > 0))
     for approach in approaches:
         await asyncio.to_thread(app.state.approach_store.upsert, collector.mode, approach)
         inferred = infer_landing(approach, CONFIG["airport_activity"],
@@ -154,6 +171,7 @@ async def finish_replay():
     app.state.replay_task = None
     app.state.replay_source = None
     app.state.replay_collector = None
+    app.state.replay_clock = None
     activate(app.state.live_collector)
     return {"status": "stopped", "mode": "LIVE"}
 
@@ -192,6 +210,7 @@ async def run_replay(source: ReplaySource, collector: LiveCollector, clock: Repl
             app.state.replay_task = None
             app.state.replay_source = None
             app.state.replay_collector = None
+            app.state.replay_clock = None
             activate(app.state.live_collector)
 
 
@@ -204,6 +223,7 @@ async def lifespan(app: FastAPI):
     app.state.database_path = db_path
     app.state.ws_queues = set()
     app.state.replay_task = app.state.replay_source = app.state.replay_collector = None
+    app.state.replay_precompute_task = None
     app.state.event_store = SQLiteEventStore(db_path)
     await asyncio.to_thread(app.state.event_store.initialize)
     app.state.approach_store = SQLiteApproachStore(db_path)
@@ -216,6 +236,8 @@ async def lifespan(app: FastAPI):
     app.state.enrichment_service = EnrichmentService(settings=CONFIG["enrichment"], db_path=db_path,
         airport_index=AirportReferenceIndex(ROOT / airport_reference_settings["data_file"],
                                            ROOT / airport_reference_settings["database_file"]))
+    app.state.enrichment_selected_icao24 = None
+    app.state.enrichment_service.start_background()
     for warning in validate_timing_settings(CONFIG):
         logger.warning("Alert timing configuration: %s", warning)
     logger.info("Potential Conflict risk profile: %s", os.environ.get("AIR_COL_RISK_PROFILE", CONFIG["risk"]["active_profile"]))
@@ -296,8 +318,10 @@ async def events(status: str | None = None, risk: str | None = None, mode: str |
     selected_mode = (mode or getattr(getattr(app.state, "active_collector", None), "mode", "LIVE")).upper()
     if selected_mode not in {"LIVE", "REPLAY", "ALL"}:
         raise HTTPException(422, "mode must be LIVE, REPLAY, or ALL")
-    if start is not None and end is not None and start > end:
-        raise HTTPException(422, "start must be earlier than end")
+    data_range = await recorded_data_range()
+    invalid_range = validate_time_range(start, end, now=time.time(), earliest=data_range["earliest_ts"])
+    if invalid_range:
+        raise HTTPException(422, invalid_range)
     if risk and risk.upper() not in {"LOW", "MEDIUM", "HIGH", "CRITICAL", "NORMAL"}:
         raise HTTPException(422, "risk must be LOW, MEDIUM, HIGH, CRITICAL, or NORMAL")
     result = await asyncio.to_thread(app.state.event_store.query, status=status, risk=risk,
@@ -313,8 +337,40 @@ async def events(status: str | None = None, risk: str | None = None, mode: str |
             other = "REPLAY" if selected_mode == "LIVE" else "LIVE"
             message = (f"0 {selected_mode} events match these filters. The database contains "
                        f"{counts.get(selected_mode, 0)} {selected_mode} and {counts.get(other, 0)} {other} events.")
+    matching = await asyncio.to_thread(app.state.event_store.count, status=status, risk=risk,
+        mode=None if selected_mode == "ALL" else selected_mode, aircraft=aircraft, start_ts=start, end_ts=end)
     return {"mode": selected_mode, "events": result, "counts_by_mode": counts,
-            "message": message, "limit": limit, "offset": offset}
+            "total_matching": matching, "message": message, "limit": limit, "offset": offset}
+
+
+async def recorded_data_range():
+    database_path = getattr(app.state, "database_path", None)
+    if database_path is None:
+        store_path = getattr(getattr(app.state, "event_store", None), "path", None)
+        if store_path is None:
+            return {"earliest_ts": None, "latest_ts": None}
+        database_path = store_path
+    def query():
+        import sqlite3
+        with sqlite3.connect(database_path) as db:
+            tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            ranges = []
+            if "raw_states" in tables:
+                ranges.append(db.execute("SELECT MIN(fetch_time),MAX(fetch_time) FROM raw_states").fetchone())
+            if "coverage_samples" in tables:
+                ranges.append(db.execute("SELECT MIN(sample_time),MAX(sample_time) FROM coverage_samples").fetchone())
+            if "events" in tables:
+                ranges.append(db.execute("SELECT MIN(first_seen_ts),MAX(last_updated_ts) FROM events").fetchone())
+        values = [float(value) for row in ranges for value in row if value is not None]
+        return (min(values) if values else None, max(values) if values else None)
+    earliest, latest = await asyncio.to_thread(query)
+    return {"earliest_ts": earliest, "latest_ts": latest}
+
+
+@app.get("/api/data-range")
+async def data_range():
+    bounds = await recorded_data_range()
+    return {**bounds, "now_ts": time.time()}
 
 
 @app.get("/api/events/{event_id}")
@@ -346,6 +402,7 @@ async def airport():
             "prediction_ticks_min_zoom": int(CONFIG["web"].get("prediction_ticks_min_zoom", 11)),
             "inferred_display_s": float(CONFIG["airport_activity"]["inferred_display_s"]),
             "runway_badge_limit": int(CONFIG["airport_activity"]["runway_badge_limit"]),
+            "airport_activity_refresh_interval_s": int(CONFIG["airport_activity"].get("ui_refresh_interval_s", 15)),
             "label_exclusion_nm": float(CONFIG["web"].get("label_exclusion_nm", 2)),
             "trail_oldest_opacity": float(CONFIG["web"].get("trail_oldest_opacity", 0.18)),
             "trail_newest_opacity": float(CONFIG["web"].get("trail_newest_opacity", 0.82)),
@@ -358,13 +415,37 @@ async def airport():
 @app.get("/api/weather")
 async def live_weather():
     """Latest provider-backed weather; absent reports remain explicitly unavailable."""
+    if app.state.active_collector.mode == "REPLAY":
+        return {"airport": CENTER.icao, "provider": CONFIG["weather"]["provider"],
+                "status": "NOT_AVAILABLE", "metar": {"status": "NOT_AVAILABLE", "report": None},
+                "taf": {"status": "NOT_AVAILABLE", "report": None},
+                "message": "Weather is live-only and is not available for replay."}
     service = getattr(app.state, "weather_service", None)
     if service is None:
         return {"airport": CENTER.icao, "provider": CONFIG["weather"]["provider"],
                 "status": "CHECKING", "metar": {"status": "CHECKING", "report": None},
                 "taf": {"status": "CHECKING", "report": None},
                 "message": "Waiting for the live weather provider."}
-    return service.snapshot()
+    result = service.snapshot()
+    decoded = result.get("metar", {}).get("decoded")
+    ends=[]
+    if decoded:
+        try:
+            ends=[{"identifier":end.identifier,"true_heading_deg":end.true_heading_deg}
+                  for runway in runway_definitions() for end in (runway.end_a,runway.end_b)]
+        except RunwayDataError:
+            ends=[]
+        components=runway_wind_components(decoded.get("wind_direction_true_deg"),
+            decoded.get("wind_speed_kt"),decoded.get("wind_gust_kt"),ends)
+        favorable=max((item for item in components if item.get("headwind_kt") is not None),
+                      key=lambda item:item["headwind_kt"],default=None)
+        result["runway_wind"]={"components":components,
+            "best_headwind_estimate":None if favorable is None else favorable["runway_end"],
+            "note":"Wind-favors runway is an estimate only; METAR direction assumed TRUE. Reference only, not an operational weather product."}
+    else:
+        result["runway_wind"]={"components":[],"best_headwind_estimate":None,
+            "note":"Runway wind estimate unavailable without a decoded METAR and runway geometry."}
+    return result
 
 
 @app.get("/api/aircraft")
@@ -413,8 +494,43 @@ async def aircraft_info(icao24: str):
                 "route": {"available": False, "label": "Route unavailable", "reason": "Enrichment is disabled."},
                 "aircraft": {"available": False, "reason": "Enrichment is disabled."}}
     service = app.state.enrichment_service
-    return {"mode": collector.mode, "eta_uncertainty_fraction":float(CONFIG["enrichment"]["eta_uncertainty_fraction"]),
-            **await service.info(callsign=state.get("callsign") or "", icao24=state["icao24"])}
+    app.state.enrichment_selected_icao24 = state["icao24"]
+    result = await service.info(callsign=state.get("callsign") or "", icao24=state["icao24"])
+    own_approach = next((item for item in collector.current_approaches if item.get("icao24") == state["icao24"]), None)
+    now = collector.clock.now()
+    inferred_records = await asyncio.to_thread(app.state.activity_store.query, collector.mode,
+        now-float(CONFIG["airport_activity"]["inferred_display_s"]), now, 2000)
+    own_departure = next((item for item in inferred_records if item.get("icao24") == state["icao24"]
+                          and item.get("activity_type") == "LIKELY_DEPARTED"), None)
+    if not result.get("route", {}).get("available") and own_approach:
+        result["inferred_route"] = {"destination": {"icao_code": CENTER.icao, "name": AIRPORT.get("name", "Chennai International Airport"),
+            "municipality": "Chennai", "latitude": CENTER.latitude, "longitude": CENTER.longitude},
+            "reason": f"Approach estimate to runway end {own_approach['runway_end']}", "is_inferred": True}
+    if not result.get("route", {}).get("available") and own_departure:
+        result["inferred_route"] = {"origin": {"icao_code": CENTER.icao, "name": AIRPORT.get("name", "Chennai International Airport"),
+            "municipality": "Chennai", "latitude": CENTER.latitude, "longitude": CENTER.longitude},
+            "reason": f"Departure inference from runway end {own_departure.get('runway_end')}", "is_inferred": True}
+    result["phase_of_flight"] = ("arriving" if own_approach else "departing (inferred)" if own_departure else "Not classified")
+    result["runway_end"] = own_approach.get("runway_end") if own_approach else own_departure.get("runway_end") if own_departure else None
+    try:
+        frequency_settings=CONFIG["frequencies"]
+        loaded=await asyncio.to_thread(load_frequencies,airport_ident=CENTER.icao,
+            data_path=ROOT/frequency_settings["data_file"],override_path=ROOT/frequency_settings["override_file"])
+        roles=estimate_facility_roles(loaded,frequency_settings.get("departure_fallback_type","APP"))
+        facilities=estimate_aircraft_facilities([state],collector.current_approaches,roles,CONFIG["radio_estimate"])
+        result["likely_frequency"]={**facilities["estimates"][state["icao24"]],"note":"Estimate. Not a radio observation."}
+    except (OSError,KeyError,ValueError):
+        result["likely_frequency"]={"facility_type":"UNKNOWN","frequencies":[],"reasons":["Frequency reference unavailable"],"note":"Estimate. Not a radio observation."}
+    result["alerts"]=[event for event in await asyncio.to_thread(app.state.event_store.query,
+        mode=collector.mode,aircraft=state["icao24"],limit=20) if event.get("status") in {"ACTIVE","ESCALATED","CANDIDATE"}]
+    return {"mode": collector.mode, "eta_uncertainty_fraction":float(CONFIG["enrichment"]["eta_uncertainty_fraction"]), **result}
+
+
+@app.get("/api/enrichment/current")
+async def current_enrichment():
+    collector = app.state.active_collector
+    states = collector.manager.snapshot(collector.clock.now())
+    return {"mode": collector.mode, "aircraft": app.state.enrichment_service.cached_for_states(states)}
 
 
 @app.get("/api/pairs")
@@ -501,11 +617,17 @@ async def airport_activity(mode: str | None = None, start: float | None = None, 
     if selected_mode not in {"LIVE","REPLAY","ALL"}:
         raise HTTPException(422,"mode must be LIVE, REPLAY, or ALL")
     modes=("LIVE","REPLAY") if selected_mode=="ALL" else (selected_mode,)
+    now = collector.clock.now()
     records=[]
     for value in modes:
         records.extend(await asyncio.to_thread(app.state.activity_store.query,value,start,end,limit))
     records.sort(key=lambda item:item["time_ts"],reverse=True)
+    recent=[]
+    for value in modes:
+        recent.extend(await asyncio.to_thread(app.state.activity_store.query,value,now-3600,now,2000))
     return {"mode":selected_mode,"activities":records[:limit],"observed_ground_tracking_available":False,
+            "last_hour_count":len(recent),"updated_at":collector.clock.isoformat(),
+            "refresh_interval_s":int(CONFIG["airport_activity"].get("ui_refresh_interval_s",15)),
             "note":"Airport activity records marked inferred are estimates at the last observed ADS-B position; no ground position is created."}
 
 
@@ -576,6 +698,13 @@ async def radio_estimates():
     states = collector.manager.snapshot(collector.clock.now())
     result = estimate_aircraft_facilities(states, collector.current_approaches,
         frequency_data, CONFIG["radio_estimate"])
+    cached = app.state.enrichment_service.cached_for_states(states)
+    for icao24, estimate in result["estimates"].items():
+        estimate["reference"] = cached.get(icao24.upper(), {})
+        estimate["phase"] = (f"arriving RWY {next((a['runway_end'] for a in collector.current_approaches if a.get('icao24') == icao24), '')}"
+                              if any(a.get("icao24") == icao24 for a in collector.current_approaches)
+                              else "departing (inferred)" if float(estimate["state"].get("vertical_rate_mps") or 0) > 0
+                              else "overflight")
     return {"airport": CENTER.icao, "mode": collector.mode, **result}
 
 
@@ -615,13 +744,45 @@ async def runway_coverage_summary():
 
 
 @app.get("/api/replay/status")
-async def replay_status():
+async def replay_status(session_id: str | None = None):
     source = app.state.replay_source
-    session_id = None if source is None or not source._times else f"{source._times[0]:.3f}"
+    active_session_id = None if source is None or not source._times else f"{source._times[0]:.3f}"
     return {"mode": app.state.active_collector.mode, "running": source is not None,
+            "paused": False if source is None else app.state.replay_clock.paused,
+            "speed": None if source is None else app.state.replay_clock.speed,
+            "current_time": None if source is None else app.state.replay_clock.now(),
             "completed_cycles": 0 if source is None else source._index,
             "total_cycles": 0 if source is None else source.total_cycles,
-            "summary_job": None if session_id is None else await asyncio.to_thread(app.state.replay_summary_store.job, session_id)}
+            "summary_job": None if (session_id is None and source is None) else await asyncio.to_thread(
+                app.state.replay_summary_store.job, session_id or active_session_id)}
+
+
+async def rebuild_recorded_summary(start: float, end: float) -> None:
+    source=ReplaySource(app.state.database_path,start_time=start,end_time=end)
+    if source.total_cycles==0:
+        return
+    session_id=f"{source._times[0]:.3f}"
+    clock=ReplayClock()
+    collector=make_collector(None,clock=clock,mode="REPLAY",source=source,on_publish=push_active)
+    await asyncio.to_thread(app.state.replay_summary_store.begin,session_id,source._times[0],source._times[-1],source.total_cycles,source._times[0])
+    try:
+        while not source.finished:
+            timestamp=source.next_fetch_time
+            if timestamp is None: break
+            clock.set(timestamp)
+            await collector.poll_once()
+            states=collector.latest
+            low=sum(1 for state in states if state.get("on_ground") is True or
+                    (state.get("baro_altitude_m") is not None and state["baro_altitude_m"]<collector.low_altitude_m))
+            ground=sum(1 for state in states if state.get("on_ground") is True)
+            await asyncio.to_thread(app.state.replay_summary_store.record,session_id,timestamp,
+                collector.aircraft_count,low,ground,getattr(collector,"last_pair_count",0),
+                getattr(collector,"last_alerts_opened",0),clock.now())
+        await asyncio.to_thread(app.state.replay_summary_store.finish,session_id,"COMPLETE",clock.now())
+    except Exception:
+        logger.exception("Replay summary precompute failed for %s",session_id)
+        await asyncio.to_thread(app.state.replay_summary_store.finish,session_id,"FAILED",clock.now())
+        raise
 
 
 @app.get("/api/replay/sessions")
@@ -657,7 +818,8 @@ async def replay_sessions():
 
 @app.get("/api/replay/cycles")
 async def replay_cycles(start: float, end: float, limit: int = Query(default=200, ge=1, le=2000), offset: int = Query(default=0, ge=0)):
-    if start > end: raise HTTPException(422, "start must be earlier than end")
+    invalid=validate_time_range(start,end,now=time.time(),earliest=(await recorded_data_range())["earliest_ts"])
+    if invalid: raise HTTPException(422,invalid)
     def read_cycles():
         import sqlite3
         with sqlite3.connect(app.state.database_path) as db:
@@ -682,6 +844,19 @@ async def replay_cycles(start: float, end: float, limit: int = Query(default=200
             "note":"Pair and alert summaries are populated as the selected recorded range is processed through replay."}
 
 
+@app.post("/api/replay/summaries/rebuild")
+async def rebuild_replay_summaries(start: float, end: float):
+    invalid=validate_time_range(start,end,now=time.time(),earliest=(await recorded_data_range())["earliest_ts"])
+    if invalid: raise HTTPException(422,invalid)
+    task=getattr(app.state,"replay_precompute_task",None)
+    if task is not None and not task.done(): raise HTTPException(409,"A replay summary rebuild is already running.")
+    source=ReplaySource(app.state.database_path,start_time=start,end_time=end)
+    if source.total_cycles==0: raise HTTPException(404,"No recorded cycles exist in this range.")
+    app.state.replay_precompute_task=asyncio.create_task(rebuild_recorded_summary(start,end))
+    return {"status":"RUNNING","session_id":f"{source._times[0]:.3f}","total_cycles":source.total_cycles,
+            "note":"Headless derived replay summary; recorded raw_states are read-only."}
+
+
 @app.post("/api/replay/start")
 async def replay_start(request: ReplayRequest):
     settings = CONFIG["replay"]
@@ -690,14 +865,19 @@ async def replay_start(request: ReplayRequest):
         raise HTTPException(422, f"speed must be between {settings['min_speed']} and {settings['max_speed']}x")
     if request.start_time is not None and request.end_time is not None and request.start_time > request.end_time:
         raise HTTPException(422, "start_time must be before end_time")
+    data_range=await recorded_data_range()
+    invalid_range = validate_time_range(request.start_time, request.end_time, now=time.time(),earliest=data_range["earliest_ts"])
+    if invalid_range:
+        raise HTTPException(422, invalid_range)
     if app.state.replay_task is not None:
         await finish_replay()
     source = ReplaySource(app.state.database_path, start_time=request.start_time, end_time=request.end_time)
     if source.total_cycles == 0:
         raise HTTPException(404, "No app-recorded live poll cycles in the requested replay range.")
     clock = ReplayClock()
+    clock.speed = speed
     collector = make_collector(None, clock=clock, mode="REPLAY", source=source, on_publish=push_active)
-    app.state.replay_source, app.state.replay_collector = source, collector
+    app.state.replay_source, app.state.replay_collector, app.state.replay_clock = source, collector, clock
     session_id = f"{source._times[0]:.3f}"
     await asyncio.to_thread(app.state.replay_summary_store.begin, session_id, source._times[0], source._times[-1],
                             source.total_cycles, source._times[0])
@@ -705,6 +885,70 @@ async def replay_start(request: ReplayRequest):
     activate(collector)
     return {"mode": "REPLAY", "status": "started", "speed": speed,
             "cycles": source.total_cycles, "start_time": source._times[0], "end_time": source._times[-1]}
+
+
+@app.post("/api/replay/pause")
+async def replay_pause():
+    clock = getattr(app.state, "replay_clock", None)
+    if clock is None:
+        raise HTTPException(409, "No replay is running.")
+    clock.pause()
+    return {"mode":"REPLAY","paused":True,"current_time":clock.now()}
+
+
+@app.post("/api/replay/resume")
+async def replay_resume():
+    clock = getattr(app.state, "replay_clock", None)
+    if clock is None:
+        raise HTTPException(409, "No replay is running.")
+    clock.resume()
+    return {"mode":"REPLAY","paused":False,"current_time":clock.now()}
+
+
+@app.post("/api/replay/step")
+async def replay_step(direction: int = Query(default=1, ge=-1, le=1)):
+    if direction == 0:
+        raise HTTPException(422, "direction must be -1 or 1")
+    source = getattr(app.state, "replay_source", None)
+    clock = getattr(app.state, "replay_clock", None)
+    if source is None or clock is None:
+        raise HTTPException(409, "No replay is running.")
+    if direction < 0:
+        previous_index = max(0, source._index - 2)
+        target = source._times[previous_index]
+        end = source._times[-1]
+        await finish_replay()
+        result = await replay_start(ReplayRequest(start_time=target, end_time=end, speed=clock.speed))
+        app.state.replay_clock.pause()
+        return {**result,"paused":True,"seek_time":target,"note":"Backward step restarts replay at that recorded cycle; pipeline history is rebuilt from that point onward."}
+    clock.step()
+    return {"mode":"REPLAY","paused":True,"direction":1,"current_time":clock.now()}
+
+
+@app.post("/api/replay/speed")
+async def replay_speed(speed: float = Query(..., gt=0)):
+    settings=CONFIG["replay"]
+    if not float(settings["min_speed"])<=speed<=float(settings["max_speed"]):
+        raise HTTPException(422,"speed is outside configured replay bounds")
+    clock=getattr(app.state,"replay_clock",None)
+    if clock is None: raise HTTPException(409,"No replay is running.")
+    clock.set_speed(speed)
+    return {"mode":"REPLAY","speed":clock.speed,"paused":clock.paused}
+
+
+@app.post("/api/replay/seek")
+async def replay_seek(timestamp: float):
+    source=getattr(app.state,"replay_source",None)
+    if source is None: raise HTTPException(409,"No replay session is active.")
+    invalid=validate_time_range(timestamp,None,now=time.time(),earliest=(await recorded_data_range())["earliest_ts"])
+    if invalid: raise HTTPException(422,invalid)
+    end=source._times[-1]
+    speed=app.state.replay_clock.speed
+    await finish_replay()
+    result=await replay_start(ReplayRequest(start_time=timestamp,end_time=end,speed=speed))
+    app.state.replay_clock.pause()
+    return {**result,"paused":True,"seek_time":timestamp,
+            "note":"Seeking creates a replay from the chosen recorded cycle; earlier state history is not reconstructed."}
 
 
 @app.post("/api/replay/stop")

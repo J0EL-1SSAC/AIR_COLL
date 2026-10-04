@@ -194,6 +194,7 @@ airport_reference:
 enrichment:
   enabled: true
   airlines_file: data/airlines.dat
+  airlines_override_file: data/airlines_override.yaml
   base_url: https://api.adsbdb.com/v0
   timeout_s: 5
   max_requests_per_window: 30
@@ -209,7 +210,7 @@ weather:
   provider: AviationWeather.gov Data API
   metar_url: https://aviationweather.gov/api/data/metar
   taf_url: https://aviationweather.gov/api/data/taf
-  refresh_interval_s: 60
+  refresh_interval_s: 600
   taf_refresh_interval_s: 600
   request_timeout_s: 15
   max_metar_age_s: 3600
@@ -253,6 +254,7 @@ airport_activity:
   departure_max_height_ft: 3000
   inferred_display_s: 600
   runway_badge_limit: 3
+  ui_refresh_interval_s: 15
 
 occupancy:
   enabled: true

@@ -159,6 +159,28 @@ class SQLiteEventStore:
             rows = connection.execute("SELECT mode,COUNT(*) FROM events GROUP BY mode").fetchall()
         return {str(mode): int(count) for mode, count in rows}
 
+    def count(self, *, status: str | None = None, risk: str | None = None,
+              mode: str | None = "LIVE", aircraft: str | None = None,
+              start_ts: float | None = None, end_ts: float | None = None) -> int:
+        clauses, params = [], []
+        if mode:
+            clauses.append("mode=?"); params.append(mode)
+        if status:
+            clauses.append("status=?"); params.append(status.upper())
+        if risk:
+            clauses.append("(current_risk=? OR peak_risk=?)"); params.extend((risk.upper(), risk.upper()))
+        if aircraft:
+            clauses.append("(lower(aircraft_1_icao24)=lower(?) OR lower(aircraft_2_icao24)=lower(?))")
+            params.extend((aircraft, aircraft))
+        if start_ts is not None:
+            clauses.append("first_seen_ts>=?"); params.append(float(start_ts))
+        if end_ts is not None:
+            clauses.append("first_seen_ts<=?"); params.append(float(end_ts))
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        with sqlite3.connect(self.path, timeout=30) as connection:
+            row = connection.execute(f"SELECT COUNT(*) FROM events{where}", params).fetchone()
+        return int(row[0])
+
     def active(self, *, mode: str = "LIVE") -> list[dict]:
         return self._active(mode)
 
