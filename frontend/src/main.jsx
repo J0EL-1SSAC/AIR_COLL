@@ -23,6 +23,8 @@ function App(){
   const [activeAlerts,setActiveAlerts]=useState([]);
   const [eventHistory,setEventHistory]=useState([]);
   const [riskConfig,setRiskConfig]=useState(null);
+  const [weather,setWeather]=useState(null);
+  const [frequencyData,setFrequencyData]=useState(null);
   const [selectedEvent,setSelectedEvent]=useState(null);
   const [alertRefresh,setAlertRefresh]=useState(0);
   const [alertsLoading,setAlertsLoading]=useState(false);
@@ -72,6 +74,19 @@ function App(){
     fetch(`${apiBase}/api/risk/config`).then(response=>response.ok?response.json():Promise.reject(new Error('Risk settings unavailable.')))
       .then(setRiskConfig).catch(()=>setRiskConfig(null));
   },[mode]);
+
+  useEffect(()=>{
+    if(!airport)return undefined;
+    let stopped=false;
+    const refresh=()=>fetch(`${apiBase}/api/weather`).then(response=>response.ok?response.json():Promise.reject(new Error('Weather service unavailable.')))
+      .then(data=>{if(!stopped)setWeather(data);})
+      .catch(()=>{if(!stopped)setWeather({status:'NO_DATA',message:'Live weather is not available from the backend.',metar:{status:'NOT_AVAILABLE'},taf:{status:'NOT_AVAILABLE'}});});
+    refresh();
+    const timer=window.setInterval(refresh,Number(airport.weather?.refresh_interval_s||60)*1000);
+    fetch(`${apiBase}/api/frequencies`).then(response=>response.ok?response.json():Promise.reject(new Error('Frequency reference unavailable.')))
+      .then(data=>{if(!stopped)setFrequencyData(data);}).catch(()=>{if(!stopped)setFrequencyData({available:false,error:'Local frequency reference is not available.'});});
+    return()=>{stopped=true;window.clearInterval(timer);};
+  },[airport]);
 
   useEffect(()=>{
     const timer=window.setInterval(()=>{const now=new Date();setUtcNow(now.toISOString().slice(11,19));setAgeNow(Date.now());},UI.updateAgeTickMs);
@@ -201,7 +216,7 @@ function App(){
       riskProfile={riskConfig?.active_profile}
       lastUpdateAge={lastUpdateAge} onToggleLeft={()=>setLeftCollapsed(value=>!value)} onToggleRight={()=>setRightCollapsed(value=>!value)}/>
     <div className="operations-layout">
-      {!leftCollapsed&&<ResearchSidePanel airport={airport} counts={counts} predictionCounts={predictionCounts} mapLayers={mapLayers} runwayMessage={runwayMessage}
+      {!leftCollapsed&&<ResearchSidePanel airport={airport} counts={counts} predictionCounts={predictionCounts} mapLayers={mapLayers} runwayMessage={runwayMessage} weather={weather} frequencyData={frequencyData}
         onLayerChange={updateLayer} labelMode={labelMode} onLabelMode={setLabelMode} basemap={basemap} onBasemap={changeBasemap}
         groundOnly={groundOnly} onGroundOnly={setGroundOnly} aircraft={visibleAircraft} selectedAircraft={selectedAircraft}
         selectedPrediction={selectedAircraft?predictions[selectedAircraft.icao24]:null} pairs={pairs} thresholds={pairThresholds}
