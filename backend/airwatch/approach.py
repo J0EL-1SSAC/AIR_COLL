@@ -21,9 +21,13 @@ def evaluate_approach(state: dict, end, settings: dict, now: float) -> dict:
     age = float(state.get("age_s") or 0.0)
     if x is None or y is None:
         return {"eligible": False, "reason": "position_unavailable"}
-    dist = distance_to_threshold(x, y, end.x_m, end.y_m)
-    along = along_track_distance(x, y, end.x_m, end.y_m, end.true_heading_deg)
-    cross = cross_track_error(x, y, end.x_m, end.y_m, end.true_heading_deg)
+    landing_x = getattr(end, "landing_threshold_x_m", None)
+    landing_y = getattr(end, "landing_threshold_y_m", None)
+    threshold_x = landing_x if landing_x is not None else end.x_m
+    threshold_y = landing_y if landing_y is not None else end.y_m
+    dist = distance_to_threshold(x, y, threshold_x, threshold_y)
+    along = along_track_distance(x, y, threshold_x, threshold_y, end.true_heading_deg)
+    cross = cross_track_error(x, y, threshold_x, threshold_y, end.true_heading_deg)
     hdg_diff = None if state.get("track_deg") is None else heading_difference(state["track_deg"], end.true_heading_deg)
     height = None if altitude is None else altitude - (end.elevation_m or 0.0)
     speed = state.get("velocity_mps")
@@ -34,7 +38,7 @@ def evaluate_approach(state: dict, end, settings: dict, now: float) -> dict:
     history = [p for p in state.get("history", []) if p.get("x_m") is not None and p.get("y_m") is not None
                and now - float(p.get("timestamp", now)) <= float(settings["closing_window_s"])
                and point_in_corridor(float(p["x_m"]), float(p["y_m"]), end.corridor_polygon)]
-    along_values = [(float(p.get("timestamp", now)), along_track_distance(p["x_m"], p["y_m"], end.x_m, end.y_m, end.true_heading_deg)) for p in history]
+    along_values = [(float(p.get("timestamp", now)), along_track_distance(p["x_m"], p["y_m"], threshold_x, threshold_y, end.true_heading_deg)) for p in history]
     closing = len(along_values) >= int(settings["min_closing_samples"]) and along_values[-1][1] < along_values[0][1] - float(settings["min_closing_distance_m"])
     vertical_fpm = (state.get("vertical_rate_mps") or 0.0) * 60 * M_TO_FT
     descending_or_glide = vertical_fpm <= float(settings["max_vertical_rate_fpm"]) or (glide is not None and float(settings["min_glide_angle_deg"]) <= glide <= float(settings["max_glide_angle_deg"]))
