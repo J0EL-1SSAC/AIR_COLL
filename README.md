@@ -20,8 +20,11 @@ The running application uses real OpenSky data only. It never substitutes demo a
 - Headless evaluation of recorded ranges, with CSV and Markdown reports.
 - Runway-end model with ENU core/buffer polygons, extended centerlines, and approach corridors (uses a user-supplied runway CSV).
 - Read-only surveillance coverage report with altitude/distance bands, report age, fade-out heuristics, and runway coverage when runway geometry is available.
+- Experimental runway-end approach tracking with clock-based confirmation, ETA windows, confidence, and persistent `approach_tracks` records.
+- Experimental runway occupancy observations that stay `UNKNOWN` until a runway-buffer-specific measured-coverage gate passes.
+- Bright side-tab dashboard for Overview, Aircraft, Approaches, Alerts, and Replay, using CARTO Voyager by default with OpenStreetMap and CARTO Dark Matter alternatives.
 
-Runway occupancy and runway conflict detection are not implemented yet. Runway geometry and coverage are research aids and require verification against official charts.
+Runway occupancy is experimental and not validated by the current coverage record; runway conflict alerts remain future work. Runway geometry and coverage are research aids and require verification against official charts.
 
 ## Requirements
 
@@ -70,7 +73,7 @@ Start the frontend in a second terminal:
 npm --prefix frontend run dev
 ```
 
-Open the local URL printed by Vite, usually `http://localhost:5173`. Missing credentials, API errors, and empty responses are shown as degraded/no-data; no synthetic aircraft are generated.
+Open the local URL printed by Vite, usually `http://localhost:5173`. CARTO/OSM tiles require internet access; check each provider's usage terms. Missing credentials, API errors, and empty responses are shown as degraded/no-data; no synthetic aircraft are generated.
 
 ### Risk profiles
 
@@ -122,6 +125,18 @@ Set `runways.magnetic_variation_deg` in `config.yaml` to the current VOMM variat
 
 The dashboard requests `/api/runways`; if the CSV is missing or contains no VOMM runway rows, the UI reports that and draws no substitute geometry. Runway core is on by default; buffer and approach corridor layers are off by default. Click a runway to inspect its source metadata.
 
+Approach tracking uses true headings computed from threshold coordinates and the state manager's age-compensated ENU positions. The `approach` section in `config.yaml` controls heading, speed, glide/descent, freshness, movement window, confirmation, hysteresis, and runway-in-use evidence. ETA is a min–max window because samples may be 25–30 seconds apart and reports may be aged. Output is a research estimate and requires review against runway charts and recorded tracks.
+
+The `occupancy` section configures experimental buffered-runway evidence and its coverage gate. The latest report currently has zero on-ground reports and no runway geometry; the API therefore returns `UNKNOWN` and “Runway occupancy not assessable with current data.” Missing reports are not evidence of a clear runway. Once runway geometry exists, rerun the coverage report to calculate runway-buffer low-altitude and ground rates.
+
+Replay recorded data through the state and approach pipeline:
+
+```bash
+.venv/bin/python scripts/runway_stats.py --db data/airwatch.db --output-dir reports/runway_stats
+```
+
+Optional UTC bounds: `--start 2026-10-03T10:00:00Z --end 2026-10-03T11:00:00Z`. Outputs include JSON, per-hour CSV, and Markdown. Replayed observations are not written to `raw_states`.
+
 The runway CSV is excluded from Git so a manual data download is not accidentally committed. Generated coverage reports are also ignored and can be regenerated from the local database at any time.
 
 Generate the read-only report from observations already in SQLite:
@@ -147,6 +162,10 @@ Optional UTC bounds use `--start 2026-10-03T10:00:00Z --end 2026-10-03T11:00:00Z
 - `GET /api/coverage` — recorded coverage summaries.
 - `GET /api/runways` — runway metadata and core, buffer, centerline, and approach-corridor GeoJSON in longitude/latitude order; returns an actionable error if the runway file is missing.
 - `GET /api/coverage/runway-summary` — headlines from the latest generated report (404 until a report exists).
+- `GET /api/approaches` — current approach evidence and persistent tracks for the selected LIVE/REPLAY mode.
+- `GET /api/runway-status` — runway-use estimate, approach evidence, experimental occupancy state, and measured gate inputs.
+- `GET /api/replay/sessions` — recorded LIVE poll sessions split at `replay_ui.session_gap_s`.
+- `GET /api/replay/cycles?start=...&end=...&limit=...&offset=...` — read-only poll metrics; cycle-level pair counts are unavailable unless stored as derived records.
 - `GET /api/replay/status`, `POST /api/replay/start`, `POST /api/replay/stop` — replay controls.
 - `WS /ws/live` — aircraft/status snapshots plus `type: "alert"` messages with `opened`, `updated`, `escalated`, or `resolved` sub-events.
 
@@ -168,12 +187,13 @@ The default database is `data/airwatch.db` (ignored by Git), using SQLite. It co
 - `raw_states` — raw/normalized source observations and fetch timestamps.
 - `coverage_samples` — received aircraft counts and coverage summaries per poll.
 - `events` — alert lifecycle, LIVE/REPLAY mode, profile, current and worst CPA values, reasons, confidence, resolution, and aircraft snapshots.
+- `approach_tracks` — persistent approach state and latest measurements, tagged LIVE or REPLAY.
 
 Event queries default to LIVE so replay events are not mixed into live history. Event timestamps use UTC epoch seconds. The event table is initialized and migrated by the service.
 
 ## Configuration
 
-Edit `config.yaml` for airport coordinates/radius, OpenSky endpoints, polling/backoff, state quality/staleness, storage, replay, predictions, CPA, web display, runway model/validation/geometry, coverage analysis, and risk settings. Risk settings include named profiles, separation/time thresholds, filtering and adjustment policies, confirmation and clear hysteresis, cooldown, data-loss timeout, and confidence thresholds. `AIR_COL_CONFIG` can point to an alternate YAML file. Keep OAuth secrets in environment variables.
+Edit `config.yaml` for airport coordinates/radius, OpenSky endpoints, polling/backoff, state quality/staleness, storage, replay, predictions, CPA, web display, runway model/validation/geometry, coverage analysis, approach, occupancy, replay UI, and risk settings. Risk settings include named profiles, separation/time thresholds, filtering and adjustment policies, confirmation and clear hysteresis, cooldown, data-loss timeout, and confidence thresholds. `AIR_COL_CONFIG` can point to an alternate YAML file. Keep OAuth secrets in environment variables.
 
 ## Tests and build
 
