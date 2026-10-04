@@ -1,0 +1,8 @@
+overrides:
+  - airport_ident: VOMM
+    type: GCA
+    frequency_mhz: 125.7
+    description: SCHENNAI RADARS
+    values:
+      description: CHENNAI RADARS
+    reason: Correct OurAirports spelling typo; verify name and frequency against the official AIP
