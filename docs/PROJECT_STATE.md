@@ -12,6 +12,7 @@ AIR_COL/
 ├── requirements.txt
 ├── backend/airwatch/
 │   ├── api/{__init__.py,app.py}
+│   ├── airport_reference.py
 │   ├── alerts.py
 │   ├── approach.py
 │   ├── approach_store.py
@@ -22,6 +23,7 @@ AIR_COL/
 │   ├── coverage_analysis.py
 │   ├── evaluation.py
 │   ├── event_store.py
+│   ├── frequencies.py
 │   ├── geometry.py
 │   ├── models.py
 │   ├── opensky.py
@@ -43,8 +45,9 @@ AIR_COL/
 │       ├── config.js
 │       ├── main.jsx
 │       └── style.css
-├── scripts/{coverage_report,evaluate_alerts,runway_stats,verify_runways}.py
-├── tests/{test_alerts,test_config,test_cpa,test_coverage_analysis,test_enu_frame,test_event_store,test_evaluation,test_geometry,test_opensky_limits,test_pairs,test_prediction,test_replay,test_risk,test_runways,test_state_manager,test_storage}.py
+├── scripts/{coverage_report,evaluate_alerts,runway_stats,verify_frequencies,verify_runways}.py
+├── tests/{test_airport_reference,test_alerts,test_config,test_cpa,test_coverage_analysis,test_enu_frame,test_event_store,test_evaluation,test_frequencies,test_geometry,test_opensky_limits,test_pairs,test_prediction,test_replay,test_risk,test_runways,test_state_manager,test_storage}.py
+├── data/ (local OurAirports CSVs and SQLite files; ignored by Git)
 └── docs/PROJECT_STATE.md
 ```
 
@@ -97,6 +100,8 @@ The default collector poll interval is 30 seconds. Confirmation requires two qua
 - `GET /api/events/{event_id}`: full stored event with snapshots, score components, reasons, and CPA coordinates.
 - `GET /api/coverage`: recent recorded live coverage.
 - `GET /api/runways`: runway metadata plus core, buffer, extended centerline and approach corridor GeoJSON in standard `[longitude, latitude]` coordinate order. Returns HTTP 503 with manual file instructions if runway data is missing or contains no matching airport rows.
+- `GET /api/frequencies`: selected local frequency rows plus clearly labeled estimated DEP/CLR facility fallback and AIP verification notices.
+- `GET /api/reference/airports/{code}`: offline ICAO/IATA/OurAirports-ident lookup, backed by lazily built indexes; only one matching row is returned.
 - `GET /api/coverage/runway-summary`: headline numbers from `coverage_report.output_dir/coverage_summary.json`, HTTP 404 until the report script has generated one.
 - Replay: `GET /api/replay/status`, `POST /api/replay/start` with optional `{start_time,end_time,speed}`, and `POST /api/replay/stop`.
 - `/ws/live`: existing snapshot envelope `{type,mode,ts,source_status,data}`. Alert messages use `type: "alert"`, the same outer envelope, and `data: {sub_event,event}` where `sub_event` is `opened`, `updated`, `escalated`, or `resolved`.
@@ -148,7 +153,7 @@ The verification output prints computed true and magnetic headings plus magnetic
 
 ## Phase 8 current input/report state
 
-At the final Phase 8 verification, `data/runways.csv` and `data/runways_override.yaml` were absent. The live collector continued recording while the report ran. The latest report contained 1,855 raw-state rows, 362 poll cycles, 59 distinct aircraft over 3.32 hours, with 11 poll gaps above the configured 90 seconds. It showed 213 reports in the 0–500 ft band, 163 in 500–1,000 ft, no received on-ground reports, and median data age about 6.66 s. The data is below the configured six-hour minimum; runway geometry was unavailable, so runway-specific recommendations are **insufficient data**. Counts can increase while collection remains active. These values describe received reports only, not complete receiver coverage.
+This section's original Phase 8 values are historical. Current local data setup and refreshed coverage results are documented in “Data setup and verification before Phase 10” below.
 
 ## Verification
 
@@ -172,8 +177,38 @@ The risk profiles are configurable research examples, not validated separation c
 
 New config sections: `approach` (geometry/quality limits, confirmation, hysteresis, speed uncertainty, runway-in-use evidence), `occupancy` (persistence, ghost TTL, evidence and coverage gate), and `replay_ui.session_gap_s`. Occupancy coverage uses **runway-buffer-specific** low-altitude and on-ground rates. The Phase 8 report has only airport-wide low-altitude rates; those are intentionally not accepted as a runway-buffer gate.
 
-The updated coverage run spans 29.47 elapsed hours but only 4.27 hours of observed poll-to-poll coverage (the report now excludes gaps over the configured 90 seconds from its recording-hours gate). It includes 582 recorded poll cycles / 3,042 reports, with 41 gaps longer than 90 seconds and zero on-ground reports. `data/runways.csv` is absent, so runway-buffer rates, approach corridors, and runway geometry are unavailable; the report says approach monitoring and occupancy are insufficient data. `/api/runway-status` therefore returns `occupancy_assessable: false` and `UNKNOWN` when runway rows are available, with the explicit message “Runway occupancy not assessable with current data.” These figures are received data only, not proof of no activity.
+The earlier Phase 9 recording values are historical; see the data verification section appended below for the current report. `/api/runway-status` returns `occupancy_assessable: false` and `UNKNOWN` when the measured gate fails, with the explicit message “Runway occupancy not assessable with current data.” These figures are received data only, not proof of no activity.
 
 Run `scripts/runway_stats.py --db data/airwatch.db --output-dir reports/runway_stats` to replay the selected recorded range through the state and approach trackers. The script writes JSON, a per-hour CSV, and Markdown. Install/run commands remain as above; API and UI launch as documented. Tests now include approach decision math/tracking, approach SQLite mode separation, and occupancy unknown/single-sample/ghost behavior.
 
 The Phase 9 browser redesign uses a bright theme, a vertical side tab rail, a scrolling panel, Overview/Aircraft/Approaches/Alerts/Replay views, and light CARTO Voyager default with OSM/Dark alternatives. Some requested replay conveniences remain limited: replay can start from a selected timestamp, but there is no true pause/step/scrub transport yet, and cycle table pairs/opened-alert counts are explicitly unavailable. Validate sizing and map tile availability in the browser.
+
+## Data setup and verification before Phase 10
+
+Local OurAirports inputs are `data/runways.csv`, `data/airport-frequencies.csv`, `data/airports.csv`, and `data/navaids.csv`. They are not tracked (`data/*.csv` is ignored); navaids is not used yet. Download manually from [OurAirports Data](https://ourairports.com/data/) and place under `data/`. Paths are in `runways`, `frequencies`, and `airport_reference` config sections.
+
+OurAirports documents the runway-end coordinates as centers of the low/high ends and the displaced-threshold field as a length. We assume that displacement starts at the physical end and proceeds inward on the centerline. The computed 30-end landing threshold is offset 787 ft inward; runway-30 approach corridors, distance-to-threshold, and along-track values use that displaced point. This direction is a project geometry assumption that must be verified against the VOMM AIP/aerodrome chart. The [OurAirports runway field definitions](https://ourairports.com/help/data-dictionary.html) support the physical-end and displacement interpretation, but are not a replacement for the AIP.
+
+Magnetic variation remains unconfirmed. `runways.magnetic_variation_confirmed` is `false`; the numeric 0.0 is ignored as a placeholder, magnetic heading is printed `UNCONFIRMED`, and warnings remain active. Do not set this true until the user supplies the value for the relevant chart date.
+
+`backend/airwatch/frequencies.py` loads selected local frequency rows and logs each override from `data/frequencies_override.yaml`. The file corrects `SCHENNAI RADARS` to `CHENNAI RADARS`. Since no DEP or CLR entries exist, APP is shown only as an explicitly labeled facility estimate for those roles, with AIP verification required. `scripts/verify_frequencies.py` prints the VOMM records; `GET /api/frequencies` exposes them. `backend/airwatch/airport_reference.py` lazily builds an indexed SQLite database at `data/airport_reference.db`; `GET /api/reference/airports/{code}` resolves ICAO, IATA, and OurAirports ident locally and returns only one record. The frontend does not load the full 86k-row reference CSV.
+
+Commands:
+
+```bash
+.venv/bin/python scripts/verify_runways.py
+.venv/bin/python scripts/verify_frequencies.py
+.venv/bin/python scripts/coverage_report.py --db data/airwatch.db --output-dir reports/coverage
+.venv/bin/python scripts/runway_stats.py --db data/airwatch.db --output-dir reports/runway_stats
+.venv/bin/python -m pytest -q
+```
+
+Local runway verification loaded two VOMM runway records: 07/25 (12,001 × 148 ft, ASP) and 12/30 (6,708 × 148 ft, PEM). Coordinate-derived true headings: 68.9°, 248.9°, 117.4°, 297.4°. OurAirports `heading_degT` fields: 69°, 249°, 117.6°, 297.6°. The 30 end has 787 ft displacement. Surface `PEM` is retained as the source code and is not reinterpreted. **Verify all identifiers, threshold coordinates/displacement, dimensions, surface, true and magnetic headings against the official AIP/aerodrome chart.**
+
+The two physical runway centerlines intersect at ENU (1028.9 m E, 41.8 m N), 467.3 m from the 25 landing threshold and 498.8 m from the displaced 30 landing threshold. The 25/30 buffers overlap by 36,367.2 m², and their approach corridors overlap by 1,671,231.3 m². Their true headings differ by 48.6°, while each configured ±15° heading acceptance window is disjoint, so one true track cannot pass both heading gates. The 07/12 approach corridors have no intersection; their heading windows are also disjoint by the same 48.6°. Corridor overlap for 25/30 is expected from the crossing geometry, but heading gating keeps the runway-end classifier separable. These geometries still need chart review.
+
+The latest coverage report used 3,650 received reports, 660 poll cycles, 156 distinct aircraft, and 4.81 observed hours, with 41 poll gaps longer than the configured threshold. Heuristic fade-out classified 71 arrivals, 51 departures, and 20 ambiguous tracks. Arrival last-seen median was 746 ft above airport level and 2.88 NM from the nearest threshold. Arrival altitude counts were 18 / 34 / 6 / 1 / 4 / 8 in the configured bands from 0–500 ft through above 5,000 ft; threshold-distance counts were 25 / 30 / 5 / 7 / 4 in 0–2 / 2–5 / 5–10 / 10–20 / 20–40 NM. These are last received reports, not aircraft disappearance points.
+
+The report found 11 runway-buffer reports (8 for 07/25; 3 for 12/30), all under 1,000 ft above airport level. Approach-corridor reports below ceiling: 07 601, 25 60, 12 197, 30 21. The runway-stat replay processed 660 cycles and reported 47 approach estimates (36 end 07, 11 end 12, none for 25/30) and 47 corridor segments with fewer than two distinct position samples; per-hour and per-track details are in `reports/runway_stats/`. It counted 0 on-ground aircraft. Occupancy is **not assessable**: 4.81 observed hours vs 6 required; runway-buffer low-altitude 2.29 reports/hour vs 5 required; on-ground 0/hour vs 5 required. All replayed runway statuses were `UNKNOWN`, and the coverage recommendation remains **insufficient data**. Zero received on-ground reports does not mean the runways were empty; all values describe only received data.
+
+The coverage renderer had an uncaught `NameError` when formatting its final runway-buffer interpretation; that was corrected. The VOMM reference-data test reads the manually supplied local CSV and skips when another checkout lacks it; compact synthetic airport/frequency CSVs in their tests are isolated fixtures only. The full suite currently passes 98 tests.
