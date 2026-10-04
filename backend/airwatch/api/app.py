@@ -28,6 +28,8 @@ from ..runways import RunwayDataError, load_runways
 from ..approach import ApproachTracker
 from ..occupancy import OccupancyTracker
 from ..approach_store import SQLiteApproachStore
+from ..frequencies import load_frequencies, estimate_facility_roles
+from ..airport_reference import AirportReferenceIndex
 
 ROOT = Path(__file__).resolve().parents[3]
 CONFIG_PATH = Path(os.environ.get("AIR_COL_CONFIG", ROOT / "config.yaml"))
@@ -442,6 +444,30 @@ async def runways():
     from ..geometry import local_transformers
     _forward, inverse = local_transformers(float(AIRPORT["latitude"]), float(AIRPORT["longitude"]))
     return {"airport": CENTER.icao, "runways": [item.as_dict(inverse_transformer=inverse) for item in definitions]}
+
+
+@app.get("/api/frequencies")
+async def airport_frequencies():
+    settings = CONFIG["frequencies"]
+    try:
+        data = await asyncio.to_thread(load_frequencies, airport_ident=CENTER.icao,
+            data_path=ROOT / settings["data_file"], override_path=ROOT / settings["override_file"])
+    except FileNotFoundError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
+    return {"airport": CENTER.icao, **estimate_facility_roles(data, settings.get("departure_fallback_type", "APP"))}
+
+
+@app.get("/api/reference/airports/{code}")
+async def airport_reference_lookup(code: str):
+    settings = CONFIG["airport_reference"]
+    index = AirportReferenceIndex(ROOT / settings["data_file"], ROOT / settings["database_file"])
+    try:
+        result = await asyncio.to_thread(index.lookup, code)
+    except FileNotFoundError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
+    if result is None:
+        raise HTTPException(status_code=404, detail=f"No airport reference match for {code.upper()}")
+    return result
 
 
 @app.get("/api/coverage/runway-summary")
