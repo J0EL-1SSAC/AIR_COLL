@@ -85,4 +85,29 @@ def test_go_around_suspected_after_climb_and_receding_position():
     assert any(item["state"]=="GO_AROUND_SUSPECTED" for item in result)
 
 
+def test_tracker_counts_distinct_position_timestamps_not_repeated_polls():
+    end=runway_end(); runway=SimpleNamespace(end_a=end,end_b=SimpleNamespace(**{**end.__dict__,"identifier":"27","true_heading_deg":270}))
+    tracker=ApproachTracker(settings())
+    first=state(-3000,100,position_timestamp=95)
+    second=state(-3000,130,position_timestamp=95)
+    assert tracker.update([first],[runway],100)[0]["samples"]==1
+    assert tracker.update([second],[runway],130)[0]["samples"]==1
+    third=state(-2800,160,position_timestamp=155)
+    assert tracker.update([third],[runway],160)[0]["samples"]==2
+
+
+def test_terminal_approach_starts_a_new_segment_after_configured_gap():
+    end=runway_end(); runway=SimpleNamespace(end_a=end,end_b=SimpleNamespace(**{**end.__dict__,"identifier":"27","true_heading_deg":270}))
+    tracker=ApproachTracker(settings(restart_after_s=300))
+    first=state(-3000,100,position_timestamp=95)
+    tracker.update([first],[runway],100)
+    tracker.update([],[runway],200)
+    assert tracker.tracks[("test01","09")]["state"]=="LOST"
+    reappeared=state(-2500,500,position_timestamp=495)
+    result=tracker.update([reappeared],[runway],500)
+    end_result=next(item for item in result if item["runway_end"]=="09")
+    assert end_result["first_seen_ts"]==500
+    assert end_result["samples"]==1
+
+
 import pytest

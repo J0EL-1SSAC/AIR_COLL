@@ -1,4 +1,4 @@
-# AIR_COL project state — Phase 9
+# AIR_COL project state — Phase 10
 
 AIR_COL is a research and education prototype for live ADS-B around one configured airport. It is **not ATC, TCAS/ACAS, or a certified safety system**. It uses live OpenSky observations and app-recorded observations for replay and offline evaluation. It does not generate fallback or demo aircraft. Potential Aircraft Conflict entries are research estimates, not official separation determinations.
 
@@ -13,6 +13,9 @@ AIR_COL/
 ├── backend/airwatch/
 │   ├── api/{__init__.py,app.py}
 │   ├── airport_reference.py
+│   ├── airport_activity.py
+│   ├── activity_store.py
+│   ├── enrichment.py
 │   ├── alerts.py
 │   ├── approach.py
 │   ├── approach_store.py
@@ -46,8 +49,8 @@ AIR_COL/
 │       ├── config.js
 │       ├── main.jsx
 │       └── style.css
-├── scripts/{coverage_report,evaluate_alerts,runway_stats,verify_frequencies,verify_runways}.py
-├── tests/{test_airport_reference,test_alerts,test_config,test_cpa,test_coverage_analysis,test_enu_frame,test_event_store,test_evaluation,test_frequencies,test_geometry,test_opensky_limits,test_pairs,test_prediction,test_replay,test_risk,test_runways,test_state_manager,test_storage,test_weather}.py
+├── scripts/{coverage_report,evaluate_alerts,runway_stats,test_enrichment,verify_frequencies,verify_runways}.py
+├── tests/{test_airport_activity,test_enrichment,test_events_api,test_airport_reference,test_alerts,test_config,test_cpa,test_coverage_analysis,test_enu_frame,test_event_store,test_evaluation,test_frequencies,test_geometry,test_opensky_limits,test_pairs,test_prediction,test_replay,test_risk,test_runways,test_state_manager,test_storage,test_weather}.py
 ├── data/ (local OurAirports CSVs and SQLite files; ignored by Git)
 └── docs/PROJECT_STATE.md
 ```
@@ -222,3 +225,57 @@ The latest coverage report used 3,650 received reports, 660 poll cycles, 156 dis
 The report found 11 runway-buffer reports (8 for 07/25; 3 for 12/30), all under 1,000 ft above airport level. Approach-corridor reports below ceiling: 07 601, 25 60, 12 197, 30 21. The runway-stat replay processed 660 cycles and reported 47 approach estimates (36 end 07, 11 end 12, none for 25/30) and 47 corridor segments with fewer than two distinct position samples; per-hour and per-track details are in `reports/runway_stats/`. It counted 0 on-ground aircraft. Occupancy is **not assessable**: 4.81 observed hours vs 6 required; runway-buffer low-altitude 2.29 reports/hour vs 5 required; on-ground 0/hour vs 5 required. All replayed runway statuses were `UNKNOWN`, and the coverage recommendation remains **insufficient data**. Zero received on-ground reports does not mean the runways were empty; all values describe only received data.
 
 The coverage renderer had an uncaught `NameError` when formatting its final runway-buffer interpretation; that was corrected. The VOMM reference-data test reads the manually supplied local CSV and skips when another checkout lacks it; compact synthetic airport/frequency CSVs in their tests are isolated fixtures only. The full suite currently passes 98 tests.
+
+
+## Phase 10 work completed in this workspace
+
+### Alert history and selection
+
+`GET /api/events` now defaults to the active pipeline mode, accepts `mode=ALL`, and returns counts by mode plus an empty-result explanation. Status remains unfiltered by default; the dashboard uses the current mode and a 24-hour history range by default, with All/Last hour/Last 6 h/Last 24 h/custom options. Event time filters are Unix epoch seconds. The actual local SQLite check found one event at the time of implementation: one LIVE, RESOLVED, `research_default` event, with `first_seen_ts=1791128606.45493` and `resolved_ts=1791128697.83444`; these values are seconds. The screenshot's zero result was caused by requesting `mode=REPLAY` while the DB event was tagged LIVE. The API and dashboard now expose ALL and mode totals so this does not fail silently. Verify the current database, which may gain rows as the collector runs, with:
+
+```bash
+sqlite3 data/airwatch.db "SELECT mode,status,risk_profile,COUNT(*),MIN(first_seen_ts),MAX(first_seen_ts) FROM events GROUP BY mode,status,risk_profile;"
+sqlite3 data/airwatch.db "SELECT event_id,mode,status,first_seen_ts,last_updated_ts,resolved_ts FROM events;"
+curl 'http://127.0.0.1:8000/api/events'
+curl 'http://127.0.0.1:8000/api/events?mode=LIVE'
+curl 'http://127.0.0.1:8000/api/events?mode=REPLAY'
+curl 'http://127.0.0.1:8000/api/events?mode=ALL'
+```
+
+The map deduplicates visible states by ICAO24, labels reduced-quality `!` markers in the legend, declutters labels, labels approach corridor and extended-centerline geometry, and caps runway centerline extensions at the config value `runways.centerline_extension_nm` (1 NM beyond each end). A shared selected ICAO24 is used across aircraft/approach/radio/activity/event lists; selecting pans to the observed or last observed coordinates and opens a map popup. A last-known selected aircraft gets a dashed marker at its last observed position and a no-longer-reporting message. Pair/event focus preserves both identifiers. Keyboard Escape closes selection and `/` focuses aircraft search. Side tab, map layers, labels and basemap are remembered in localStorage.
+
+### Enrichment and radio estimates
+
+`backend/airwatch/enrichment.py` asynchronously looks up adsbdb callsign and Mode S aircraft reference data. `/api/aircraft/{icao24}/info` rejects states not currently positioned, airborne and inside the configured monitor radius. A small in-memory cache enforces TTL and provider failure backoff; `enrichment_cache` persists fetch time/source/negative status only, not response content. The optional OpenFlights-format `data/airlines.dat` is not tracked. The request-rate window and all TTLs live under `enrichment` in `config.yaml`. The selected map popup draws a dotted great-circle line only when the callsign route and locally resolved destination coordinates are available. This is an estimated reference route, not a filed/actual flight path.
+
+adsbdb's README credits PlaneBase (aircraft data) and David Taylor and Jim Mason (flight-route data), and warns route data may not be incorporated into other databases without David Taylor's permission. No general API license statement was found in the public materials. AIR_COL therefore does not persist the route response. The `scripts/test_enrichment.py` checker reads the `raw_states` table through a read-only connection; it does append cache metadata to the main DB. A one-callsign check on this environment returned 0/1 airline, 0/1 route, and 0/1 aircraft-type matches. This is not a representative hit rate. Run with `--limit 25` on a networked Mac for a useful sample.
+
+`GET /api/frequencies` continues to serve local OurAirports records. `GET /api/radio-estimates` classifies current aircraft into likely facilities using configured rules and returns aircraft counts. These values are estimates, not a radio observation. UI and README state that live ATC audio is not included; no audio source has been added.
+
+### Inferred airport activity and approach data diagnosis
+
+`airport_activity.py` produces only `LIKELY_LANDED` and `LIKELY_DEPARTED` research inferences and stores them in `airport_activity`, tagged LIVE/REPLAY. These records never enter pair, risk, alert, or occupancy calculations. Map markers use the last observed coordinates only and are visually dashed/labeled inferred; no position is invented. The airport activity panel and runway-end badges show inferred state. The configuration currently uses 5 NM / 1,500 ft landing limits, chosen around the previous recorded median last-seen arrival (2.88 NM, 746 ft above airport level) with margin for noisy public ADS-B. These are tuning parameters, not validated cutoffs. Runway occupancy still remains UNKNOWN/not assessable under the measured-coverage gate.
+
+The current read-only runway-stat replay included 794 recorded cycles (2026-10-03T10:12:24Z–2026-10-04T17:04:45Z during this run). It detected 58 approach segments: 47 on RWY 07 and 11 on RWY 12; none on 25/30. Seventeen tracks had one distinct position timestamp (sample distribution min/median/max 1/2/6); position-time span min/median/max was 0/22/769 s. First distance-to-threshold min/median/max was 1.02/2.94/4.73 NM, and last distance was 0.15/1.95/3.25 NM. Historical inference counted 34 likely landings and 1 likely departure, not ground truth. Because the recording continued to grow between runs, the older 47 count (36 RWY07, 11 RWY12) and current 58 count are not a controlled before/after code comparison.
+
+The prior report conflated 47 approach tracks with 47 corridor-participation segments below two samples: `runway_stats.py` had overwritten the approach-track count with the separate corridor segment count. This is corrected; the script now reports both. It also exports every approach's timestamps, distinct-position count, first/last threshold distance, age-compensated ENU position, along/cross-track values, implied glide angle, confidence and outcome to `approach_track_diagnostics.csv`. The current run counted 53 corridor segments with fewer than two unique position timestamps separately from 17 one-sample approach tracks. The current complete DB contains 796 coverage poll times at inspection, 41 gaps over 90 s, median cycle gap 30.47 s and maximum gap 34,174 s; no >90 s gap fell inside/adjacent to the 58 approach windows. Of 4,605 raw state rows, 3,596 distinct `(icao24, position_timestamp)` pairs were recorded and none had a missing position timestamp, so repeated timestamps exist but do not explain most sparse tracks. The best-supported explanation is sparse eligible reporting within short approach corridors plus the configured corridor/heading/speed/descent/freshness filters and ordinary receiver coverage limits. The data do not establish which aircraft were physically present when ADS-B reports stopped.
+
+One genuine tracker issue was fixed: terminal runway-end tracks could be reused when the same aircraft reappeared much later. `approach.restart_after_s` (300 s) now starts a new segment after the prior terminal state; distinct `position_timestamp` values, not repeated poll sightings, determine sample count. Tracks with too few samples remain visible with LOW confidence. Do not loosen classification thresholds solely to increase counts without checking false matches against source tracks.
+
+For a hand check, the current diagnostic includes IGO564M (ICAO24 `801410`) on runway end 12. It had 3 distinct position timestamps over 43 s, first/last range 2.61/0.22 NM, and its last age-compensated diagnostics were along-track 408.35 m, cross-track −11.96 m, implied glide angle 4.06°, heading difference 0.09°, and vertical rate −704.72 ft/min. Reproduce its underlying reports (epoch times are seconds) with:
+
+```bash
+sqlite3 data/airwatch.db "SELECT fetch_time,callsign,position_timestamp,latitude,longitude,baro_altitude_m,geo_altitude_m,track_deg,velocity_mps,vertical_rate_mps FROM raw_states WHERE lower(icao24)='801410' AND fetch_time BETWEEN 1791022567.636952 AND 1791022631.296587 ORDER BY fetch_time;"
+.venv/bin/python scripts/verify_runways.py
+.venv/bin/python scripts/runway_stats.py --db data/airwatch.db --output-dir reports/runway_stats
+```
+
+Use the runway-12 true heading and displaced threshold coordinates from the verification output; project the reports into the same airport ENU frame, age-compensate at the matching poll time, and apply `along_track_distance`, `cross_track_error`, and `atan2(height_above_threshold, along_track_distance)`. The stored raw rows show five polls but three distinct position timestamps for this segment, illustrating repeated timestamp de-duplication without interpolating an aircraft position.
+
+### Phase 10 limitations and remaining verification
+
+A live browser visual inspection was not available in this environment. The backend attempted startup but the sandbox denied local port binding; the live CLI exited cleanly with `DEGRADED` because `OPENSKY_CLIENT_ID`/`OPENSKY_CLIENT_SECRET` are not present here. The one-callsign adsbdb check cannot characterize provider coverage. Runway activity inference has no ground truth and must be checked against an independent public flight tracker. Current approach classifier does not give authoritative phase-of-flight labels. Occupancy remains unassessable (latest gate: about 5.67 h against 6 h minimum; 2.29 low-altitude reports/hour inside buffers versus 5 required; 0 on-ground reports/hour versus 5 required).
+
+Replay still does not implement pause, cycle stepping, a scrubber, or a full precomputed selected-session summary job. While a replay is played, it now writes rebuildable `replay_cycle_summaries` rows (strictly tagged REPLAY) with aircraft, low-altitude, on-ground, CPA-pair and opened-alert counts; `replay_summary_jobs` reports its progress. `GET /api/replay/cycles` overlays these derived values for cycles that have actually passed through replay, so before playback or for unplayed cycles the pair and alert values remain unavailable. Replay observations are never inserted into `raw_states`. The selected-aircraft card and estimated great-circle route are implemented, but route enrichment only runs on selection and the online response is held in memory because of the adsbdb route-data restriction. The card may therefore show Unknown/Route unavailable when callsign/provider/reference coverage is absent.
+
+Latest automated verification for this phase: `.venv/bin/python -m pytest -q` passed 114 tests; `npm --prefix frontend run build` passed. `python -m backend.airwatch.cli --once` reported `DEGRADED`, aircraft=0, and no substitute data due missing credentials.

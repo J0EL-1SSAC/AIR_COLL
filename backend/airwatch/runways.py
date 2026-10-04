@@ -91,6 +91,7 @@ class Runway:
                                  (self.end_b.x_m + eb_u[0] * extension_m, self.end_b.y_m + eb_u[1] * extension_m)])
         return {"identifier": self.identifier, "pair_identifier": self.pair_identifier,
                 "airport_ident": self.airport_ident, "length_m": self.length_m, "width_m": self.width_m,
+                "centerline_extension_m": self.centerline_extension_m,
                 "source_length_m": self.source_length_m, "surface": self.surface, "lighted": self.lighted,
                 "closed": self.closed, "end_a": end_dict(self.end_a, self.end_b), "end_b": end_dict(self.end_b, self.end_a),
                 "centerline_geojson": _geometry_geojson(centerline, inverse_transformer),
@@ -259,9 +260,10 @@ def load_runways(*, airport_ident: str, latitude: float, longitude: float, setti
                                             longitudinal_extension_m=float(settings["buffer_longitudinal_m"]),
                                             lateral_extension_m=float(settings["buffer_lateral_m"]))
             pair_id = f"{end_a_id}/{end_b_id}"
+            centerline_extension_m = float(settings["centerline_extension_nm"]) * NM_TO_M
             runway_list.append(Runway(pair_id, pair_id, airport_ident, length_m, width_m, source_length_m,
                                       row.get("surface") or None, _bool(row, "lighted"), closed,
-                                      end_a, end_b, corridor_length, core, buffer, tuple(warnings)))
+                                      end_a, end_b, centerline_extension_m, core, buffer, tuple(warnings)))
     if not runway_list:
         raise RunwayDataError(f"No runway rows found for airport_ident={airport_ident} in {data_path} (closed rows may be excluded).")
     return runway_list

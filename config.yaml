@@ -169,6 +169,7 @@ runways:
   buffer_lateral_m: 60
   buffer_longitudinal_m: 90
   approach_length_nm: 5
+  centerline_extension_nm: 1
   corridor_half_width_threshold_m: 900
   corridor_half_width_far_m: 2500
   approach_altitude_ceiling_m: 1500
@@ -177,11 +178,30 @@ frequencies:
   data_file: data/airport-frequencies.csv
   override_file: data/frequencies_override.yaml
   departure_fallback_type: APP
+
+radio_estimate:
+  short_final_distance_nm: 1.5
+  departure_climb_min_fpm: 500
+  departure_distance_nm: 5
+  departure_max_altitude_ft: 3000
+  departure_fallback_type: APP
   require_aip_verification: true
 
 airport_reference:
   data_file: data/airports.csv
   database_file: data/airport_reference.db
+
+enrichment:
+  enabled: true
+  airlines_file: data/airlines.dat
+  base_url: https://api.adsbdb.com/v0
+  timeout_s: 5
+  max_requests_per_window: 30
+  rate_window_s: 60
+  callsign_ttl_s: 21600
+  aircraft_ttl_s: 86400
+  failure_backoff_s: 300
+  eta_uncertainty_fraction: 0.2
 
 # Live aviation weather from AviationWeather.gov Data API. METAR and TAF are
 # separate products with different update rates; missing/failed products stay unavailable.
@@ -211,6 +231,7 @@ approach:
   near_threshold_distance_m: 1500
   clear_hysteresis_s: 30
   lost_timeout_s: 90
+  restart_after_s: 300
   go_around_climb_fpm: 500
   runway_in_use_window_min: 20
   runway_in_use_min_approaches: 2
@@ -218,6 +239,20 @@ approach:
   age_distance_uncertainty_mps: 8
   confidence_min_samples_medium: 3
   confidence_min_samples_high: 5
+
+airport_activity:
+  landing_inference_max_distance_nm: 5
+  landing_inference_max_height_ft: 1500
+  min_samples: 2
+  medium_confidence_min_samples: 3
+  high_confidence_min_samples: 5
+  max_heading_diff_deg: 15
+  departure_min_samples: 2
+  departure_min_climb_fpm: 500
+  departure_max_distance_nm: 1.5
+  departure_max_height_ft: 3000
+  inferred_display_s: 600
+  runway_badge_limit: 3
 
 occupancy:
   enabled: true

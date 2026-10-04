@@ -17,6 +17,7 @@ def _settings(path, overrides=None):
             "include_closed": False, "default_width_m": 40, "magnetic_variation_deg": 0,
             "heading_tolerance_deg": 12, "max_threshold_distance_from_airport_m": 2000,
             "length_tolerance_m": 20, "buffer_lateral_m": 20, "buffer_longitudinal_m": 30,
+            "centerline_extension_nm": 1,
             "approach_length_nm": 2, "corridor_half_width_threshold_m": 100,
             "corridor_half_width_far_m": 500, "approach_altitude_ceiling_m": 500}
 

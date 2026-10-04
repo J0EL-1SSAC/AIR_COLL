@@ -80,6 +80,9 @@ def evaluate_approach(state: dict, end, settings: dict, now: float) -> dict:
             "cross_track_error_m": cross, "along_track_distance_m": along,
             "heading_difference_deg": hdg_diff, "implied_glide_angle_deg": glide,
             "ground_speed_mps": speed, "ground_speed_kt": speed_kt,
+            "observed_latitude": state.get("latitude"), "observed_longitude": state.get("longitude"),
+            "position_timestamp": state.get("position_timestamp"),
+            "analysis_x_m": x, "analysis_y_m": y,
             "eta_window_s": {"min": eta_min, "max": eta_max}, "samples_in_corridor": sample_count,
             "data_age_s": age, "confidence": confidence, "vertical_rate_fpm": vertical_fpm}
 
@@ -90,6 +93,12 @@ class ApproachTracker:
         self.settings = settings
         self.tracks: dict[tuple[str, str], dict[str, Any]] = {}
         self.completed: list[dict] = []
+
+    @staticmethod
+    def _new_track(now: float) -> dict[str, Any]:
+        return {"state": "CANDIDATE", "first_seen_ts": now, "last_seen_ts": now,
+                "samples": 0, "position_sample_keys": set(), "confirmed_since": now,
+                "outcome": None}
 
     def update(self, states: list[dict], runways: list, now: float) -> list[dict]:
         observed: set[tuple[str, str]] = set()
@@ -102,13 +111,19 @@ class ApproachTracker:
                     track = self.tracks.get(key)
                     if evidence.get("eligible"):
                         observed.add(key)
-                        if track is None:
-                            track = {"state": "CANDIDATE", "first_seen_ts": now, "last_seen_ts": now,
-                                     "samples": 0, "confirmed_since": now, "outcome": None}
+                        terminal = {"PASSED_THRESHOLD_ZONE", "LOST", "GO_AROUND_SUSPECTED", "LEFT_CORRIDOR"}
+                        restart_after = float(self.settings.get("restart_after_s", self.settings["lost_timeout_s"]))
+                        if track is None or (track["state"] in terminal and
+                                             now - track["last_seen_ts"] >= restart_after):
+                            track = self._new_track(now)
                             self.tracks[key] = track
                         track["last_seen_ts"] = now
                         track["not_eligible_since"] = None
-                        track["samples"] += 1
+                        position_sample_key = state.get("position_timestamp")
+                        if position_sample_key is None:
+                            position_sample_key = state.get("last_position_seen", now)
+                        track["position_sample_keys"].add(position_sample_key)
+                        track["samples"] = len(track["position_sample_keys"])
                         track["last_distance_m"] = evidence.get("distance_to_threshold_m")
                         if now - track["confirmed_since"] >= float(self.settings["confirm_s"]):
                             track["state"] = "NEAR_THRESHOLD" if evidence["distance_to_threshold_m"] <= float(self.settings["near_threshold_distance_m"]) else "LIKELY_APPROACHING"

@@ -5,6 +5,7 @@ dist/
 data/*.db
 data/*.db-*
 data/*.csv
+data/airlines.dat
 reports/coverage/
 reports/alert_evaluation/
 reports/runway_stats/

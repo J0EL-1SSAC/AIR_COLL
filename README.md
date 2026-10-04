@@ -24,7 +24,9 @@ The running application uses real OpenSky data only. It never substitutes demo a
 - Experimental runway occupancy observations that stay `UNKNOWN` until a runway-buffer-specific measured-coverage gate passes.
 - Offline OurAirports frequency lookups and a lazily indexed airport reference database for ICAO/IATA code resolution.
 - Live VOMM METAR and TAF retrieval through the AviationWeather.gov Data API, with provider/observation timestamps and explicit unavailable, stale, or degraded states. No forecast or weather fallback is generated locally.
-- Bright side-tab dashboard for Overview, Aircraft, Approaches, Alerts, and Replay, using CARTO Voyager by default with OpenStreetMap and CARTO Dark Matter alternatives.
+- Bright side-tab dashboard for Overview, Aircraft, Approaches, Alerts, Replay, and Radio, using CARTO Voyager by default with OpenStreetMap and CARTO Dark Matter alternatives.
+- ADS-B event history defaults to the current pipeline mode, supports LIVE/REPLAY/ALL filtering, and explains empty results with per-mode database counts.
+- Selected-aircraft map popup, last-seen selection state, facility estimate counts, and clearly labeled inferred activity at last observed positions.
 
 Runway occupancy is experimental and not validated by the current coverage record; runway conflict alerts remain future work. Runway geometry, frequencies and coverage are research aids and require verification against official charts.
 
@@ -35,6 +37,24 @@ The Overview panel shows VOMM's current METAR and TAF from [AviationWeather.gov'
 Weather API contract: `GET /api/weather` returns overall status (`CHECKING`, `OK`, `DEGRADED`, or `NO_DATA`) and separate `metar` and `taf` products, each with `status`, `report`, `error`, fetch time and age. METAR/TAF reports are provider records; missing reports are `null`. Provider: AviationWeather.gov; its API is queried by ICAO station identifier. `config.yaml` contains the URLs, intervals, request timeout, report age limit and User-Agent. No additional dependency is needed (the project already uses httpx).
 
 The Overview panel also shows the locally supplied OurAirports frequency records and labels them as reference data. Frequencies are not live transmissions and must be verified against the official AIP; a missing local CSV is displayed as unavailable.
+
+### Radio estimates and aircraft reference enrichment
+
+The Radio tab reads VOMM frequency rows from `data/airport-frequencies.csv`; the estimates for ground, tower, approach, and area-control facilities are rule-based and are not radio observations. There is no live ATC audio in this prototype. Streaming ATC audio may be restricted by local law; this README does not assess legal requirements.
+
+Selected airborne aircraft may be looked up at [adsbdb](https://github.com/FugginOld/adsb-db/blob/main/README.md) for airline, aircraft type, and reported callsign route. The UI labels the route as a callsign-database report because callsigns can be reused and route records can be outdated. adsbdb's README credits PlaneBase for aircraft data and David Taylor and Jim Mason for route data; it says route data may not be incorporated into other databases without David Taylor's permission. Its public materials do not state a general API license. AIR_COL therefore stores only lookup metadata in `enrichment_cache`; response payloads remain in memory and are not persisted. Airline fallback from OpenFlights `data/airlines.dat` is optional. Airport names/codes are resolved from the local OurAirports reference when available. The map's estimated route is a great-circle line to a reported destination, never an actual or filed flight path.
+
+Run an opt-in reference hit-rate check against the recorded callsigns (requires internet access):
+
+```bash
+.venv/bin/python scripts/test_enrichment.py --limit 25 --db data/airwatch.db
+```
+
+The script opens `raw_states` read-only and reports measured hit rates; it does not generate route values when the provider is unavailable. ADS-B remains the only source for aircraft positions and live state.
+
+### Inferred airport activity
+
+`LIKELY_LANDED` and `LIKELY_DEPARTED` are heuristic estimates, not ground truth. A dashed amber marker is placed only at the last position that was actually observed; inferred records never enter CPA, risk, alert, or occupancy evidence. Use a public flight tracker to check an inferred call sign and time window, but treat disagreements as possible call-sign reuse, missing reports, or inference error. Reliable surface movement tracking requires a receiver near the airport or another suitable data source. Runway occupancy is currently not assessable from the measured VOMM feed.
 
 ## Requirements
 
@@ -180,7 +200,10 @@ Optional UTC bounds use `--start 2026-10-03T10:00:00Z --end 2026-10-03T11:00:00Z
 - `GET /api/pairs` — CPA metrics and pair-filter counts.
 - `GET /api/risk/config` — active profile and thresholds.
 - `GET /api/alerts/active?mode=LIVE|REPLAY` — active alerts for the selected mode.
-- `GET /api/events` — event history; filters include `status`, `risk`, `mode`, `aircraft`, `start`, `end`, `limit`, and `offset`. Mode defaults to LIVE.
+- `GET /api/events` — event history; filters include `status`, `risk`, `mode`, `aircraft`, `start`, `end`, `limit`, and `offset`. Mode defaults to the current pipeline (`LIVE` or `REPLAY`); `mode=ALL` includes both.
+- `GET /api/aircraft/{icao24}/info` — optional adsbdb and local airport reference enrichment for an airborne aircraft currently inside the monitoring radius.
+- `GET /api/radio-estimates` — current rule-based likely-facility estimates and aircraft counts, explicitly not radio observations.
+- `GET /api/airport-activity` — stored LIVE/REPLAY inferred airport activity; `mode=ALL` combines tagged records.
 - `GET /api/events/{event_id}` — complete event details and state snapshots.
 - `GET /api/coverage` — recorded coverage summaries.
 - `GET /api/runways` — runway metadata and core, buffer, centerline, and approach-corridor GeoJSON in longitude/latitude order; returns an actionable error if the runway file is missing.
@@ -215,6 +238,9 @@ The default database is `data/airwatch.db` (ignored by Git), using SQLite. The l
 - `coverage_samples` — received aircraft counts and coverage summaries per poll.
 - `events` — alert lifecycle, LIVE/REPLAY mode, profile, current and worst CPA values, reasons, confidence, resolution, and aircraft snapshots.
 - `approach_tracks` — persistent approach state and latest measurements, tagged LIVE or REPLAY.
+- `airport_activity` — explicitly inferred landed/departed records with last observed positions and LIVE/REPLAY tags.
+- `enrichment_cache` — adsbdb request metadata only (`fetched_at`, source, negative-cache flag); provider route payloads are not stored.
+- `replay_summary_jobs` and `replay_cycle_summaries` — rebuildable per-cycle derived counts for replayed sessions, tagged REPLAY; created as playback processes each cycle and never written to `raw_states`.
 
 Event queries default to LIVE so replay events are not mixed into live history. Event timestamps use UTC epoch seconds. The event table is initialized and migrated by the service.
 
@@ -232,6 +258,8 @@ npm --prefix frontend run build
 ```
 
 Tests use isolated numeric inputs and temporary databases; test records are not imported by the running application.
+
+Replay-derived cycle rows appear only after the selected recording is processed through replay. Pair and opened-alert counts are derived from the same replay pipeline. Pause, cycle stepping, and a scrubber are not available yet.
 
 ## Limitations
 
