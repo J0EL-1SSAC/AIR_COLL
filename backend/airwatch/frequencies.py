@@ -12,6 +12,56 @@ logger = logging.getLogger(__name__)
 FREQUENCY_TYPES = ("ACC", "APP", "ATIS", "GCA", "GND", "TWR")
 
 
+def estimate_controlling_facility(state: Mapping, approaches: list[Mapping], frequencies: Mapping,
+                                  settings: Mapping) -> dict:
+    """Rule-based facility estimate; this is never a radio observation."""
+    requested = "ACC"
+    reasons = ["default en-route facility estimate"]
+    if state.get("on_ground") is True:
+        requested, reasons = "GND", ["ADS-B on_ground flag is true"]
+    else:
+        own = [item for item in approaches if item.get("icao24") == state.get("icao24")]
+        near_nm = min((float(item.get("distance_to_threshold_nm", 1e9)) for item in own), default=None)
+        if own and near_nm is not None and near_nm <= float(settings["short_final_distance_nm"]):
+            requested, reasons = "TWR", ["approach estimate is near the runway threshold"]
+        elif own:
+            requested, reasons = "APP", ["aircraft has a current approach estimate"]
+        else:
+            vertical_fpm = float(state.get("vertical_rate_mps") or 0) * 196.850394
+            altitude_ft = state.get("altitude_ft")
+            if (vertical_fpm >= float(settings["departure_climb_min_fpm"])
+                    and state.get("distance_nm") is not None
+                    and float(state["distance_nm"]) <= float(settings["departure_distance_nm"])
+                    and altitude_ft is not None and float(altitude_ft) <= float(settings["departure_max_altitude_ft"])):
+                requested, reasons = "DEP", ["climbing near the airport; DEP facility is estimated"]
+    fallback_used = False
+    actual = requested
+    if requested not in frequencies:
+        fallback = settings.get("departure_fallback_type", "APP") if requested == "DEP" else None
+        if fallback and fallback in frequencies:
+            actual, fallback_used = fallback, True
+            reasons.append(f"No {requested} entry; falls back to {actual}")
+        else:
+            actual = "UNKNOWN"
+            reasons.append(f"No {requested} frequency is listed")
+    return {"requested_type": requested, "facility_type": actual,
+            "frequencies": list(frequencies.get(actual, [])), "fallback": fallback_used,
+            "reasons": reasons, "label": "Estimate. Not a radio observation."}
+
+
+def estimate_aircraft_facilities(states: list[Mapping], approaches: list[Mapping],
+                                 frequency_data: Mapping, settings: Mapping) -> dict:
+    frequencies = frequency_data.get("facilities", {})
+    estimates = {state["icao24"]: estimate_controlling_facility(state, approaches, frequencies, settings)
+                 for state in states}
+    counts: dict[str, int] = {}
+    for value in estimates.values():
+        facility = value["facility_type"]
+        counts[facility] = counts.get(facility, 0) + 1
+    return {"estimates": estimates, "counts": counts,
+            "note": "Estimate. Not a radio observation."}
+
+
 def load_frequencies(*, airport_ident: str, data_path: Path, override_path: Path | None = None,
                      types: tuple[str, ...] = FREQUENCY_TYPES) -> list[dict]:
     """Read only a selected airport from the supplied CSV; no network requests."""
