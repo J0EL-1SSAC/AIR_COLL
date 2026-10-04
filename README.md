@@ -22,9 +22,10 @@ The running application uses real OpenSky data only. It never substitutes demo a
 - Read-only surveillance coverage report with altitude/distance bands, report age, fade-out heuristics, and runway coverage when runway geometry is available.
 - Experimental runway-end approach tracking with clock-based confirmation, ETA windows, confidence, and persistent `approach_tracks` records.
 - Experimental runway occupancy observations that stay `UNKNOWN` until a runway-buffer-specific measured-coverage gate passes.
+- Offline OurAirports frequency lookups and a lazily indexed airport reference database for ICAO/IATA code resolution.
 - Bright side-tab dashboard for Overview, Aircraft, Approaches, Alerts, and Replay, using CARTO Voyager by default with OpenStreetMap and CARTO Dark Matter alternatives.
 
-Runway occupancy is experimental and not validated by the current coverage record; runway conflict alerts remain future work. Runway geometry and coverage are research aids and require verification against official charts.
+Runway occupancy is experimental and not validated by the current coverage record; runway conflict alerts remain future work. Runway geometry, frequencies and coverage are research aids and require verification against official charts.
 
 ## Requirements
 
@@ -115,19 +116,32 @@ The script writes `alert_events.csv` and `alert_evaluation.md`, including cycle 
 
 ## Runway data and coverage report
 
-The application does not download runway data. Download `runways.csv` manually from the [OurAirports data downloads page](https://ourairports.com/data/) and save it as `data/runways.csv` in the project root. The dataset is public-domain but has no guarantee of accuracy or fitness for use. The optional `data/runways_override.yaml` file supports documented corrections; each applied override is logged.
+The application does not download airport reference data. Download the needed CSVs from the [OurAirports data downloads page](https://ourairports.com/data/) and copy them into the project's `data/` directory:
 
-Set `runways.magnetic_variation_deg` in `config.yaml` to the current VOMM variation for the data/chart effective date. The default zero is treated as unconfirmed and produces a warning. Positive east variation follows `true heading = magnetic heading + variation`. Run the verification script and compare every threshold, length, width, and heading with the official AIP or aerodrome chart:
+```text
+data/runways.csv
+data/airport-frequencies.csv
+data/airports.csv
+data/navaids.csv  # not used yet
+```
+
+The repository ignores `data/*.csv`; these large local inputs are not committed. `config.yaml` points runway geometry to `data/runways.csv`, frequency lookup to `data/airport-frequencies.csv`, and the offline airport code index to `data/airports.csv`. The airport index is built lazily into ignored `data/airport_reference.db`; the frontend receives only a requested airport result, never the full CSV. The dataset is public-domain but has no guarantee of accuracy or fitness for use. The optional `data/runways_override.yaml` file supports documented runway corrections; each applied override is logged.
+
+The optional `data/frequencies_override.yaml` corrects the VOMM OurAirports description typo `SCHENNAI RADARS` to `CHENNAI RADARS`; the override is logged. When a DEP frequency is absent, the service can show APP as a clearly labeled facility estimate only, not a verified departure frequency. All frequencies must be checked against the current official AIP.
+
+Run `.venv/bin/python scripts/verify_frequencies.py` to print the local VOMM records and the departure/clearance fallback labels. `GET /api/frequencies` returns the same local reference data. `GET /api/reference/airports/VOMM` (or `/MAA`) lazily builds an indexed SQLite reference from the complete `airports.csv`, and returns only the matched record. Navaids are copied for future use but are not read in this phase.
+
+Set `runways.magnetic_variation_deg` only after checking the value for VOMM and the chart effective date, then set `runways.magnetic_variation_confirmed: true`. Until you provide the confirmed value, the unconfirmed warning remains active; no value is guessed. Positive east variation follows `true heading = magnetic heading + variation`. The runway endpoints and `heading_degT` source fields are also checked. Run the verification script and compare every physical end, displaced landing threshold, length, width, surface, and heading with the official AIP or aerodrome chart:
 
 ```bash
 .venv/bin/python scripts/verify_runways.py
 ```
 
-The dashboard requests `/api/runways`; if the CSV is missing or contains no VOMM runway rows, the UI reports that and draws no substitute geometry. Runway core is on by default; buffer and approach corridor layers are off by default. Click a runway to inspect its source metadata.
+The dashboard requests `/api/runways`; if the CSV is missing or contains no VOMM runway rows, the UI reports that and draws no substitute geometry. Runway core is on by default; buffer and approach corridor layers are off by default. Click a runway to inspect its source metadata. OurAirports `*_displaced_threshold_ft` is interpreted as a distance from the recorded physical runway end toward the reciprocal end; approach corridors, threshold distance and along-track measurements use the resulting landing threshold. Verify this assumption and the recorded VOMM value against the official AIP.
 
 Approach tracking uses true headings computed from threshold coordinates and the state manager's age-compensated ENU positions. The `approach` section in `config.yaml` controls heading, speed, glide/descent, freshness, movement window, confirmation, hysteresis, and runway-in-use evidence. ETA is a min–max window because samples may be 25–30 seconds apart and reports may be aged. Output is a research estimate and requires review against runway charts and recorded tracks.
 
-The `occupancy` section configures experimental buffered-runway evidence and its coverage gate. The latest report currently has zero on-ground reports and no runway geometry; the API therefore returns `UNKNOWN` and “Runway occupancy not assessable with current data.” Missing reports are not evidence of a clear runway. Once runway geometry exists, rerun the coverage report to calculate runway-buffer low-altitude and ground rates.
+The `occupancy` section configures experimental buffered-runway evidence and its coverage gate. Missing reports are not evidence of a clear runway. Rerun the coverage report after installing runway geometry to calculate runway-buffer low-altitude and ground rates.
 
 Replay recorded data through the state and approach pipeline:
 
@@ -137,7 +151,7 @@ Replay recorded data through the state and approach pipeline:
 
 Optional UTC bounds: `--start 2026-10-03T10:00:00Z --end 2026-10-03T11:00:00Z`. Outputs include JSON, per-hour CSV, and Markdown. Replayed observations are not written to `raw_states`.
 
-The runway CSV is excluded from Git so a manual data download is not accidentally committed. Generated coverage reports are also ignored and can be regenerated from the local database at any time.
+All local `data/*.csv` downloads are excluded from Git. Generated coverage reports and the indexed airport-reference SQLite file are also ignored and can be regenerated from local inputs at any time.
 
 Generate the read-only report from observations already in SQLite:
 
@@ -161,6 +175,10 @@ Optional UTC bounds use `--start 2026-10-03T10:00:00Z --end 2026-10-03T11:00:00Z
 - `GET /api/events/{event_id}` — complete event details and state snapshots.
 - `GET /api/coverage` — recorded coverage summaries.
 - `GET /api/runways` — runway metadata and core, buffer, centerline, and approach-corridor GeoJSON in longitude/latitude order; returns an actionable error if the runway file is missing.
+- `GET /api/frequencies` — local frequency records and clearly labeled facility estimates when DEP/CLR entries are absent.
+- `GET /api/reference/airports/{code}` — offline airport lookup by ICAO, IATA, or OurAirports ident, backed by a lazy indexed SQLite copy.
+- `GET /api/frequencies` — local airport frequency rows and explicitly labeled facility-role estimate/fallback.
+- `GET /api/reference/airports/{code}` — indexed offline lookup by ICAO, IATA, or OurAirports ident.
 - `GET /api/coverage/runway-summary` — headlines from the latest generated report (404 until a report exists).
 - `GET /api/approaches` — current approach evidence and persistent tracks for the selected LIVE/REPLAY mode.
 - `GET /api/runway-status` — runway-use estimate, approach evidence, experimental occupancy state, and measured gate inputs.
@@ -182,7 +200,7 @@ curl http://127.0.0.1:8000/api/coverage/runway-summary
 
 ## Data storage
 
-The default database is `data/airwatch.db` (ignored by Git), using SQLite. It contains:
+The default database is `data/airwatch.db` (ignored by Git), using SQLite. The lazily built offline reference index uses separate ignored `data/airport_reference.db`. The main database contains:
 
 - `raw_states` — raw/normalized source observations and fetch timestamps.
 - `coverage_samples` — received aircraft counts and coverage summaries per poll.
@@ -193,7 +211,7 @@ Event queries default to LIVE so replay events are not mixed into live history. 
 
 ## Configuration
 
-Edit `config.yaml` for airport coordinates/radius, OpenSky endpoints, polling/backoff, state quality/staleness, storage, replay, predictions, CPA, web display, runway model/validation/geometry, coverage analysis, approach, occupancy, replay UI, and risk settings. Risk settings include named profiles, separation/time thresholds, filtering and adjustment policies, confirmation and clear hysteresis, cooldown, data-loss timeout, and confidence thresholds. `AIR_COL_CONFIG` can point to an alternate YAML file. Keep OAuth secrets in environment variables.
+Edit `config.yaml` for airport coordinates/radius, OpenSky endpoints, polling/backoff, state quality/staleness, storage, replay, predictions, CPA, web display, runway/frequency/airport-reference data paths, runway model/validation/geometry, coverage analysis, approach, occupancy, replay UI, and risk settings. Risk settings include named profiles, separation/time thresholds, filtering and adjustment policies, confirmation and clear hysteresis, cooldown, data-loss timeout, and confidence thresholds. `AIR_COL_CONFIG` can point to an alternate YAML file. Keep OAuth secrets in environment variables.
 
 ## Tests and build
 
