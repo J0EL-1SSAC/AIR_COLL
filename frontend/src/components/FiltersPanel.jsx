@@ -14,7 +14,7 @@ function Legend({airport}) {
   </div>;
 }
 
-export default function FiltersPanel({airport,counts, predictionCounts, mapLayers, onLayerChange, labelMode, onLabelMode, basemap, onBasemap, groundOnly, onGroundOnly, runwayMessage}) {
+export default function FiltersPanel({airport,counts, predictionCounts, mapLayers, onLayerChange, labelMode, onLabelMode, basemap, onBasemap, groundOnly, onGroundOnly, runwayMessage,weather,frequencyData}) {
   const layers = [
     ['trails','Trails'], ['predictions','Predictions'], ['uncertainty','Uncertainty circles'],
     ['closestApproaches','Closest-approach lines'], ['radius','Monitoring radius'],
@@ -46,8 +46,40 @@ export default function FiltersPanel({airport,counts, predictionCounts, mapLayer
         {mapLayers.predictions && <div className="metric-tile"><strong className="metric-value">{predictionCounts.skipped}</strong><span className="metric-label">skipped by quality</span></div>}
       </div>
     </section>
+    <section className="panel-section"><h3 className="panel-heading">Live aviation weather · {airport.icao}</h3>
+      <WeatherAndFrequencies weather={weather} frequencyData={frequencyData}/>
+    </section>
     <section className="panel-section"><h3 className="panel-heading">Legend</h3><Legend airport={airport}/></section>
     {runwayMessage&&<p className="panel-note runway-unavailable" role="status">{runwayMessage}</p>}
     <p className="panel-note">Map tiles require internet access. Check CARTO and OpenStreetMap tile usage terms before sustained use.</p>
   </aside>;
+}
+
+function WeatherAndFrequencies({weather,frequencyData}) {
+  const metar=weather?.metar||{}, taf=weather?.taf||{};
+  const fields=(report)=>[
+    ['Temperature',report?.temp==null?null:`${report.temp} °C`],
+    ['Dew point',report?.dewp==null?null:`${report.dewp} °C`],
+    ['Wind',report?.wdir==null?null:`${report.wdir}°${report.wspd==null?'':` · ${report.wspd} kt`}`],
+    ['Visibility',report?.visib==null?null:`${report.visib} statute mi`],
+    ['Altimeter setting',report?.altim==null?null:`${report.altim} inHg`],
+    ['Weather',report?.wxString||null],
+    ['Clouds',Array.isArray(report?.clouds)&&report.clouds.length?report.clouds.map(c=>`${c.cover||''}${c.base==null?'':` ${c.base} ft`}`).join(', '):null],
+  ].filter(([,value])=>value!=null);
+  const time=value=>value?new Date(value).toLocaleString():'Not available';
+  return <div className="weather-content">
+    <div className={`weather-status weather-${weather?.status||'CHECKING'}`} role="status">{weather?.status||'CHECKING'} · live provider</div>
+    <h4>Current report (METAR)</h4>
+    {metar.report?.rawOb?<>
+      <p className="weather-raw">{metar.report.rawOb}</p>
+      <p className="weather-meta">Observed {time(metar.observation_time_utc)} · retrieved {time(metar.fetched_at_utc)} · {metar.age_s==null?'age unavailable':`${Math.floor(metar.age_s)} s old`} · {metar.status}</p>
+      <dl className="weather-fields">{fields(metar.report).map(([label,value])=><React.Fragment key={label}><dt>{label}</dt><dd>{value}</dd></React.Fragment>)}</dl>
+    </>:<p className="empty-state">Current METAR: Not available{metar.error?` · ${metar.error}`:''}</p>}
+    <h4>Terminal forecast (TAF)</h4>
+    {taf.report?.rawTAF?<><p className="weather-raw">{taf.report.rawTAF}</p><p className="weather-meta">Issued {time(taf.issue_time_utc)} · valid {time(taf.report.validTimeFrom?new Date(taf.report.validTimeFrom*1000).toISOString():null)} to {time(taf.report.validTimeTo?new Date(taf.report.validTimeTo*1000).toISOString():null)} · {taf.status}</p></>:<p className="empty-state">Current TAF: Not available{taf.error?` · ${taf.error}`:''}</p>}
+    <p className="panel-note">{weather?.message||'Weather comes from AviationWeather.gov; no local estimate or fallback is used.'}</p>
+    <h4>Airport radio frequencies · reference data</h4>
+    {frequencyData?.facilities?Object.entries(frequencyData.facilities).map(([type,rows])=><div className="frequency-row" key={type}><b>{type}</b><span>{rows.map(row=>`${row.frequency_mhz??'—'} MHz${row.description?` · ${row.description}`:''}`).join(' / ')||'Not listed'}</span></div>):<p className="empty-state">Frequency reference not available{frequencyData?.error?` · ${frequencyData.error}`:''}</p>}
+    <p className="panel-note">{frequencyData?.verification||'Verify all frequency values against the official AIP.'}</p>
+  </div>;
 }
