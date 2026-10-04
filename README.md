@@ -131,7 +131,7 @@ The optional `data/frequencies_override.yaml` corrects the VOMM OurAirports desc
 
 Run `.venv/bin/python scripts/verify_frequencies.py` to print the local VOMM records and the departure/clearance fallback labels. `GET /api/frequencies` returns the same local reference data. `GET /api/reference/airports/VOMM` (or `/MAA`) lazily builds an indexed SQLite reference from the complete `airports.csv`, and returns only the matched record. Navaids are copied for future use but are not read in this phase.
 
-Set `runways.magnetic_variation_deg` only after checking the value for VOMM and the chart effective date, then set `runways.magnetic_variation_confirmed: true`. Until you provide the confirmed value, the unconfirmed warning remains active; no value is guessed. Positive east variation follows `true heading = magnetic heading + variation`. The runway endpoints and `heading_degT` source fields are also checked. Run the verification script and compare every physical end, displaced landing threshold, length, width, surface, and heading with the official AIP or aerodrome chart:
+The configured Chennai variation is the user-supplied WMM2025 value −1°4′ (−1.0666667°, west), checked 2026-10-04 from [Magnetic-Declination.com](https://www.magnetic-declination.com/India/Chennai/1136292.html); its page lists −1.07° (−1°4′) and WMM2025. `magnetic_variation_confirmed` is true. Positive east variation follows `true heading = magnetic heading + variation`. The runway endpoints and `heading_degT` source fields are also checked. Verify this city value against the applicable official VOMM AIP/chart effective date, then compare every physical end, displaced landing threshold, length, width, surface, and heading:
 
 ```bash
 .venv/bin/python scripts/verify_runways.py
