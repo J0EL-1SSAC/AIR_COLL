@@ -30,6 +30,7 @@ from ..occupancy import OccupancyTracker
 from ..approach_store import SQLiteApproachStore
 from ..frequencies import load_frequencies, estimate_facility_roles
 from ..airport_reference import AirportReferenceIndex
+from ..weather import LiveWeatherService
 
 ROOT = Path(__file__).resolve().parents[3]
 CONFIG_PATH = Path(os.environ.get("AIR_COL_CONFIG", ROOT / "config.yaml"))
@@ -198,7 +199,15 @@ async def lifespan(app: FastAPI):
     app.state.collector = app.state.live_collector
     app.state.active_collector = app.state.live_collector
     app.state.collector_task = asyncio.create_task(app.state.live_collector.run_forever())
+    app.state.weather_service = LiveWeatherService(airport=CENTER.icao, settings=CONFIG["weather"])
+    app.state.weather_task = asyncio.create_task(app.state.weather_service.run())
     yield
+    app.state.weather_task.cancel()
+    try:
+        await app.state.weather_task
+    except asyncio.CancelledError:
+        pass
+    await app.state.weather_service.close()
     await finish_replay()
     app.state.collector_task.cancel()
     try:
@@ -277,6 +286,7 @@ async def airport():
     ring[-1] = ring[0]
     return {"icao": CENTER.icao, "latitude": CENTER.latitude, "longitude": CENTER.longitude,
             "radius_nm": float(AIRPORT["radius_nm"]), "radius_ring": ring,
+            "weather": {"refresh_interval_s": float(CONFIG["weather"]["refresh_interval_s"])},
             "map_zoom": int(CONFIG.get("web", {}).get("map_zoom", 9)),
             "altitude_bands_m": CONFIG.get("web", {}).get("altitude_bands_m", {}),
             "stale_after_s": float(CONFIG.get("web", {}).get("stale_after_s", 90)),
@@ -293,6 +303,18 @@ async def airport():
                 "near_nm": float(CONFIG["cpa"]["display_near_nm"]),
                 "amber_nm": float(CONFIG["cpa"]["display_amber_nm"]),
             }}
+
+
+@app.get("/api/weather")
+async def live_weather():
+    """Latest provider-backed weather; absent reports remain explicitly unavailable."""
+    service = getattr(app.state, "weather_service", None)
+    if service is None:
+        return {"airport": CENTER.icao, "provider": CONFIG["weather"]["provider"],
+                "status": "CHECKING", "metar": {"status": "CHECKING", "report": None},
+                "taf": {"status": "CHECKING", "report": None},
+                "message": "Waiting for the live weather provider."}
+    return service.snapshot()
 
 
 @app.get("/api/aircraft")
