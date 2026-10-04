@@ -23,9 +23,18 @@ The running application uses real OpenSky data only. It never substitutes demo a
 - Experimental runway-end approach tracking with clock-based confirmation, ETA windows, confidence, and persistent `approach_tracks` records.
 - Experimental runway occupancy observations that stay `UNKNOWN` until a runway-buffer-specific measured-coverage gate passes.
 - Offline OurAirports frequency lookups and a lazily indexed airport reference database for ICAO/IATA code resolution.
+- Live VOMM METAR and TAF retrieval through the AviationWeather.gov Data API, with provider/observation timestamps and explicit unavailable, stale, or degraded states. No forecast or weather fallback is generated locally.
 - Bright side-tab dashboard for Overview, Aircraft, Approaches, Alerts, and Replay, using CARTO Voyager by default with OpenStreetMap and CARTO Dark Matter alternatives.
 
 Runway occupancy is experimental and not validated by the current coverage record; runway conflict alerts remain future work. Runway geometry, frequencies and coverage are research aids and require verification against official charts.
+
+### Live weather and airport frequencies
+
+The Overview panel shows VOMM's current METAR and TAF from [AviationWeather.gov's Data API](https://aviationweather.gov/data/api/), including the provider report text, product timestamps, retrieval time, and age. METAR requests refresh at the configured `weather.refresh_interval_s` (default 60 seconds); TAF requests refresh at `weather.taf_refresh_interval_s` (default 600 seconds). If a report is absent, the provider request fails, or a report exceeds the configured freshness limit, the display says it is unavailable, degraded, or stale. Weather has no fabricated fallback. Public aviation weather reports can themselves lag the actual conditions.
+
+Weather API contract: `GET /api/weather` returns overall status (`CHECKING`, `OK`, `DEGRADED`, or `NO_DATA`) and separate `metar` and `taf` products, each with `status`, `report`, `error`, fetch time and age. METAR/TAF reports are provider records; missing reports are `null`. Provider: AviationWeather.gov; its API is queried by ICAO station identifier. `config.yaml` contains the URLs, intervals, request timeout, report age limit and User-Agent. No additional dependency is needed (the project already uses httpx).
+
+The Overview panel also shows the locally supplied OurAirports frequency records and labels them as reference data. Frequencies are not live transmissions and must be verified against the official AIP; a missing local CSV is displayed as unavailable.
 
 ## Requirements
 
