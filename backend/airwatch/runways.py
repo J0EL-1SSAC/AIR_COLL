@@ -33,12 +33,16 @@ class RunwayEnd:
     elevation_m: float | None
     displaced_threshold_m: float
     true_heading_deg: float
-    magnetic_heading_deg: float
+    magnetic_heading_deg: float | None
     magnetic_designator_heading_deg: float | None
     x_m: float
     y_m: float
     corridor_polygon: Any
     altitude_ceiling_m: float
+    landing_threshold_latitude: float | None = None
+    landing_threshold_longitude: float | None = None
+    landing_threshold_x_m: float | None = None
+    landing_threshold_y_m: float | None = None
 
     def geometry_end(self) -> RunwayEndGeometry:
         return RunwayEndGeometry(self.identifier, self.x_m, self.y_m, self.true_heading_deg,
@@ -66,6 +70,9 @@ class Runway:
     def as_dict(self, *, inverse_transformer=None) -> dict:
         def end_dict(end: RunwayEnd, opposite: RunwayEnd) -> dict:
             result = {"identifier": end.identifier, "latitude": end.latitude, "longitude": end.longitude,
+                      "physical_end": {"latitude": end.latitude, "longitude": end.longitude},
+                      "landing_threshold": {"latitude": end.landing_threshold_latitude or end.latitude,
+                                            "longitude": end.landing_threshold_longitude or end.longitude},
                       "elevation_m": end.elevation_m, "displaced_threshold_m": end.displaced_threshold_m,
                       "true_heading_deg": end.true_heading_deg,
                       "magnetic_heading_deg": end.magnetic_heading_deg,
@@ -196,34 +203,52 @@ def load_runways(*, airport_ident: str, latitude: float, longitude: float, setti
                       "half_width_threshold_m": float(settings["corridor_half_width_threshold_m"]),
                       "half_width_far_m": float(settings["corridor_half_width_far_m"])}
             designator_a, designator_b = _designator_heading(end_a_id), _designator_heading(end_b_id)
+            disp_a = (_float(row, "le_displaced_threshold_ft") or 0.0) * FT_TO_M
+            disp_b = (_float(row, "he_displaced_threshold_ft") or 0.0) * FT_TO_M
+            landing_ax = ax - math.sin(math.radians(heading_ab)) * disp_a
+            landing_ay = ay - math.cos(math.radians(heading_ab)) * disp_a
+            landing_bx = bx - math.sin(math.radians(heading_ba)) * disp_b
+            landing_by = by - math.cos(math.radians(heading_ba)) * disp_b
+            inverse = local_transformers(latitude, longitude)[1]
+            landing_a_lon, landing_a_lat = inverse.transform(landing_ax, landing_ay)
+            landing_b_lon, landing_b_lat = inverse.transform(landing_bx, landing_by)
+            variation_confirmed = bool(settings.get("magnetic_variation_confirmed", False))
             end_a = RunwayEnd(end_a_id, la_lat, la_lon,
                               None if _float(row, "le_elevation_ft") is None else _float(row, "le_elevation_ft") * FT_TO_M,
-                              (_float(row, "le_displaced_threshold_ft") or 0.0) * FT_TO_M,
-                              heading_ab, (heading_ab - variation) % 360.0, designator_a, ax, ay,
+                              disp_a,
+                              heading_ab, (heading_ab - variation) % 360.0 if variation_confirmed else None, designator_a, ax, ay,
                               approach_corridor(RunwayEndGeometry(end_a_id, ax, ay, heading_ab,
-                                  (_float(row, "le_displaced_threshold_ft") or 0.0) * FT_TO_M), **common),
-                              float(settings["approach_altitude_ceiling_m"]))
+                                  disp_a), **common),
+                              float(settings["approach_altitude_ceiling_m"]), landing_a_lat, landing_a_lon,
+                              landing_ax, landing_ay)
             end_b = RunwayEnd(end_b_id, hb_lat, hb_lon,
                               None if _float(row, "he_elevation_ft") is None else _float(row, "he_elevation_ft") * FT_TO_M,
-                              (_float(row, "he_displaced_threshold_ft") or 0.0) * FT_TO_M,
-                              heading_ba, (heading_ba - variation) % 360.0, designator_b, bx, by,
+                              disp_b,
+                              heading_ba, (heading_ba - variation) % 360.0 if variation_confirmed else None, designator_b, bx, by,
                               approach_corridor(RunwayEndGeometry(end_b_id, bx, by, heading_ba,
-                                  (_float(row, "he_displaced_threshold_ft") or 0.0) * FT_TO_M), **common),
-                              float(settings["approach_altitude_ceiling_m"]))
+                                  disp_b), **common),
+                              float(settings["approach_altitude_ceiling_m"]), landing_b_lat, landing_b_lon,
+                              landing_bx, landing_by)
             warnings = []
-            if variation == 0.0:
-                warnings.append("magnetic_variation_deg is 0.0; confirm the current VOMM variation for the source/chart effective date")
+            if not variation_confirmed:
+                warnings.append("magnetic variation is UNCONFIRMED; set it from a current official VOMM chart/effective date")
             threshold_limit = float(settings["max_threshold_distance_from_airport_m"])
             for end in (end_a, end_b):
                 airport_distance = math.hypot(end.x_m, end.y_m)
                 if airport_distance > threshold_limit:
                     warnings.append(f"{end.identifier} threshold is {airport_distance:.1f} m from airport reference point (limit {threshold_limit:.1f} m)")
-                if end.magnetic_designator_heading_deg is not None:
+                if variation_confirmed and end.magnetic_designator_heading_deg is not None:
                     # East variation is positive: true heading = magnetic heading + variation.
                     expected_true = (end.magnetic_designator_heading_deg + variation) % 360.0
                     error = heading_difference(end.true_heading_deg, expected_true)
                     if error > float(settings["heading_tolerance_deg"]):
                         warnings.append(f"{end.identifier} true heading differs from designator plus magnetic variation by {error:.1f}°")
+            for end, field in ((end_a, "le_heading_degT"), (end_b, "he_heading_degT")):
+                source_heading = _float(row, field)
+                if source_heading is not None:
+                    error = heading_difference(end.true_heading_deg, source_heading)
+                    if error > float(settings["heading_tolerance_deg"]):
+                        warnings.append(f"{end.identifier} coordinate-derived true heading differs from OurAirports heading_degT by {error:.1f}°")
             length_error = abs(geod_length - (source_length_m if source_length_m is not None else geod_length))
             if length_error > float(settings["length_tolerance_m"]):
                 warnings.append(f"coordinate length {geod_length:.1f} m differs from source length {(source_length_m or 0):.1f} m by {length_error:.1f} m")
@@ -248,6 +273,9 @@ def runway_report_rows(runways: list[Runway]) -> list[dict]:
         for end, reciprocal in ((runway.end_a, runway.end_b), (runway.end_b, runway.end_a)):
             rows.append({"runway": runway.pair_identifier, "identifier": end.identifier,
                          "latitude": end.latitude, "longitude": end.longitude,
+                         "landing_threshold_latitude": end.landing_threshold_latitude or end.latitude,
+                         "landing_threshold_longitude": end.landing_threshold_longitude or end.longitude,
+                         "displaced_threshold_m": end.displaced_threshold_m,
                          "elevation_m": end.elevation_m, "length_m": runway.length_m,
                          "width_m": runway.width_m, "true_heading_deg": end.true_heading_deg,
                          "magnetic_heading_deg": end.magnetic_heading_deg,
