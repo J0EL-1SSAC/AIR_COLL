@@ -171,6 +171,50 @@ runways:
   corridor_half_width_far_m: 2500
   approach_altitude_ceiling_m: 1500
 
+# Approach and occupancy estimates are research observations, not operational classifications.
+approach:
+  max_heading_diff_deg: 15
+  closing_window_s: 60
+  min_closing_samples: 2
+  min_closing_distance_m: 100
+  max_vertical_rate_fpm: 500
+  min_glide_angle_deg: 1.0
+  max_glide_angle_deg: 6.0
+  min_speed_kt: 60
+  max_speed_kt: 220
+  max_data_age_s: 75
+  confirm_s: 20
+  near_threshold_distance_m: 1500
+  clear_hysteresis_s: 30
+  lost_timeout_s: 90
+  go_around_climb_fpm: 500
+  runway_in_use_window_min: 20
+  runway_in_use_min_approaches: 2
+  speed_uncertainty_mps: 8
+  age_distance_uncertainty_mps: 8
+  confidence_min_samples_medium: 3
+  confidence_min_samples_high: 5
+
+occupancy:
+  enabled: true
+  ground_elevation_m: 16.4592
+  min_persistence_s: 30
+  min_consistent_samples: 2
+  max_data_age_s: 75
+  ghost_ttl_s: 120
+  ground_altitude_tolerance_m: 15
+  max_ground_speed_mps: 25
+  alignment_tolerance_deg: 20
+  crossing_min_angle_deg: 55
+  # Gate uses measured coverage report rates for received reports inside the runway buffer.
+  minimum_low_altitude_buffer_reports_per_hour: 5
+  minimum_on_ground_buffer_reports_per_hour: 5
+  minimum_recording_hours: 6
+
+replay_ui:
+  session_gap_s: 300
+  cycles_page_size: 200
+
 coverage_report:
   output_dir: reports/coverage
   ground_elevation_m: 16.4592
@@ -180,6 +224,7 @@ coverage_report:
   altitude_bands_ft: [[0, 500, "0-500 ft"], [500, 1000, "500-1,000 ft"], [1000, 2000, "1,000-2,000 ft"], [2000, 3000, "2,000-3,000 ft"], [3000, 5000, "3,000-5,000 ft"], [5000, null, "above 5,000 ft"]]
   distance_rings_nm: [[0, 2, "0-2 NM"], [2, 5, "2-5 NM"], [5, 10, "5-10 NM"], [10, 20, "10-20 NM"], [20, 40, "20-40 NM"]]
   approach_altitude_ceiling_m: 457.2 # 1,500 ft above airport level
+  runway_buffer_low_altitude_ft: 1000
   feasibility:
     minimum_recording_hours: 6
     minimum_low_altitude_reports_per_hour: 10
