@@ -76,6 +76,8 @@ def analyze_coverage(*, db_path: Path, airport_latitude: float, airport_longitud
     pos_by_aircraft = defaultdict(list)
     hourly = defaultdict(lambda: {"aircraft": set(), "low": 0, "ground": 0, "reports": 0})
     runway_buffer_reports = Counter()
+    runway_buffer_low_reports = 0
+    runway_buffer_ground_reports = 0
     corridor_reports = Counter()
     corridor_aircraft = defaultdict(set)
     for row in rows:
@@ -125,6 +127,9 @@ def analyze_coverage(*, db_path: Path, airport_latitude: float, airport_longitud
             for runway in runway_list:
                 if runway.buffer_polygon.covers(Point(x, y)):
                     runway_buffer_reports[runway.pair_identifier] += 1
+                    runway_buffer_ground_reports += int(row["on_ground"] == 1)
+                    runway_buffer_low_reports += int(row["on_ground"] != 1 and alt_agl_m is not None and
+                        alt_agl_m <= float(settings.get("runway_buffer_low_altitude_ft", 1000)) * ALTITUDE_M_PER_FT)
                 for end in (runway.end_a, runway.end_b):
                     if (end.corridor_polygon.covers(Point(x, y)) and
                             alt_agl_m is not None and alt_agl_m <= float(settings["approach_altitude_ceiling_m"])):
@@ -206,7 +211,11 @@ def analyze_coverage(*, db_path: Path, airport_latitude: float, airport_longitud
                   "mean_low_altitude_reports_per_poll": value["low"] / max(1, sum(1 for p in polls if hour <= p["sample_time"] < hour + 3600)),
                   "mean_on_ground_reports_per_poll": value["ground"] / max(1, sum(1 for p in polls if hour <= p["sample_time"] < hour + 3600)),
                   "reports": value["reports"]} for hour, value in sorted(hourly.items())]
-    duration_hours = span_s / 3600.0
+    max_poll_gap_s = float(settings.get("max_poll_gap_s", 90))
+    observed_s = sum(max(0.0, float(right["sample_time"])-float(left["sample_time"]))
+                     for left,right in zip(polls,polls[1:])
+                     if float(right["sample_time"])-float(left["sample_time"]) <= max_poll_gap_s)
+    duration_hours = observed_s / 3600.0
     low_reports = sum(value for key, value in altitude_counts.items() if key != "on ground" and key in {"0-500 ft", "500-1,000 ft"})
     ground_reports = altitude_counts["on ground"]
     runway_reports = sum(runway_buffer_reports.values())
@@ -224,6 +233,7 @@ def analyze_coverage(*, db_path: Path, airport_latitude: float, airport_longitud
         }
     report = {"source_db": str(db_path), "recording": {"first_fetch_ts": None if not polls else polls[0]["sample_time"],
               "last_fetch_ts": None if not polls else polls[-1]["sample_time"], "span_s": span_s,
+              "observed_s": observed_s, "observed_hours": duration_hours,
               "poll_cycles": len(polls), "poll_gap_count": len(gaps), "poll_gaps": gaps,
               "distinct_aircraft": len({row["icao24"] for row in rows}), "reports": total},
               "altitude_basis": "geometric altitude when available per report, otherwise barometric altitude; airport elevation subtracted",
@@ -250,6 +260,8 @@ def analyze_coverage(*, db_path: Path, airport_latitude: float, airport_longitud
               "runways_available": bool(runway_list), "on_ground_aircraft_count": len({row["icao24"] for row in rows if row["on_ground"] == 1}),
               "runway_buffer_reports": dict(runway_buffer_reports),
               "runway_buffer_report_total": runway_reports if runway_list else None,
+              "runway_buffer_low_altitude_reports": runway_buffer_low_reports if runway_list else None,
+              "runway_buffer_on_ground_reports": runway_buffer_ground_reports if runway_list else None,
               "approach_corridors": [{"corridor": key, "reports_below_ceiling": corridor_reports[key],
                                       "distinct_aircraft": len(corridor_aircraft[key])} for key in sorted(corridor_reports)],
               "tracks_near_runway_buffer": {"arrivals": sum(f["classification"] == "arrival" and f["runway_buffer"] for f in fades),
@@ -258,7 +270,9 @@ def analyze_coverage(*, db_path: Path, airport_latitude: float, airport_longitud
               "low_altitude_reports_per_hour": low_reports / max(duration_hours, 1e-9),
               "on_ground_reports_per_hour": ground_reports / max(duration_hours, 1e-9),
               "runway_buffer_reports_per_hour": (runway_reports / max(duration_hours, 1e-9)
-                                                  if runway_list else None)}
+                                                  if runway_list else None),
+              "runway_buffer_low_altitude_reports_per_hour": (runway_buffer_low_reports / max(duration_hours, 1e-9) if runway_list else None),
+              "runway_buffer_on_ground_reports_per_hour": (runway_buffer_ground_reports / max(duration_hours, 1e-9) if runway_list else None)}
     report["recommendations"] = _recommendations(report, settings)
     return report
 
@@ -271,7 +285,8 @@ def _recommendations(report: dict, settings: dict) -> dict:
         return {name: "insufficient data: runway geometry unavailable"
                 for name in ("approach_monitoring", "runway_occupancy", "runway_crossing")}
     feasible_approach = report["low_altitude_reports_per_hour"] >= float(settings["feasibility"]["minimum_low_altitude_reports_per_hour"])
-    feasible_occupancy = (report["on_ground_reports_per_hour"] >= float(settings["feasibility"]["minimum_ground_reports_per_hour"])
+    feasible_occupancy = (report.get("runway_buffer_on_ground_reports_per_hour") is not None and
+                          report["runway_buffer_on_ground_reports_per_hour"] >= float(settings["feasibility"]["minimum_ground_reports_per_hour"])
                           and report["runway_buffer_reports_per_hour"] >= float(settings["feasibility"]["minimum_runway_buffer_reports_per_hour"]))
     return {"approach_monitoring": "potentially supportable; verify low-altitude continuity and runway-specific coverage" if feasible_approach else "unreliable: low-altitude reports below configured minimum",
             "runway_occupancy": "potentially supportable only for research; ground/threshold coverage meets configured count criteria" if feasible_occupancy else "unreliable: ground or runway-buffer report rate below configured minimum",
@@ -332,6 +347,12 @@ def render_markdown(report: dict) -> str:
               "## Interpretation and feasibility", "", f"- Low-altitude reports (<1,000 ft above airport level): {report['low_altitude_reports_per_hour']:.2f} per recording hour.",
               f"- On-ground reports: {report['on_ground_reports_per_hour']:.2f} per recording hour.",
               f"- Runway-buffer reports: {runway_rate_text}.", ""]
+    if report["runways_available"]:
+        lines.extend([f"- Runway-buffer reports below configured {settings.get('runway_buffer_low_altitude_ft', 1000)} ft: {report['runway_buffer_low_altitude_reports_per_hour']:.2f} per hour.",
+                      f"- Runway-buffer on-ground reports: {report['runway_buffer_on_ground_reports_per_hour']:.2f} per hour."])
+    else:
+        lines.append("- Runway-buffer low-altitude and on-ground report rates unavailable until runway geometry is loaded.")
+    lines.append("")
     lines.extend(f"- **{name.replace('_', ' ').title()}:** {value}." for name, value in report["recommendations"].items())
     if report.get("runway_data_issue"):
         lines += ["", f"- Runway source status: unavailable ({report['runway_data_issue']}).", ""]
