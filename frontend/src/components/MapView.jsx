@@ -249,6 +249,6 @@ export default function MapView({airport,runways=[],aircraft,predictions,pairs,a
         nearAirport={state.distance_nm!=null&&state.distance_nm<(airport.label_exclusion_nm??2)} alertRisk={alertLevels[state.icao24]}/>) }
     </MapContainer>
     {mapNotice&&<div className="map-notice" role="status">{mapNotice}</div>}
-    <div className="map-caption">{basemap==='dark'?'CARTO Dark Matter':'OpenStreetMap'} · {airport.icao} · {aircraft.length} active aircraft</div>
+    <div className="map-caption">{{dark:'CARTO Dark Matter',light:'CARTO Voyager',osm:'OpenStreetMap'}[basemap]} · {airport.icao} · {aircraft.length} active aircraft</div>
   </div>;
 }
