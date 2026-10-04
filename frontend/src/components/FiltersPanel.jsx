@@ -33,7 +33,7 @@ export default function FiltersPanel({airport,counts, predictionCounts, mapLayer
         </label>
         <label className="field-label">Basemap
           <select className="select-control" value={basemap} onChange={e=>onBasemap(e.target.value)}>
-            <option value="dark">Dark · CARTO</option><option value="light">Light · OpenStreetMap</option>
+            <option value="light">Light · CARTO Voyager</option><option value="osm">OpenStreetMap</option><option value="dark">Dark · CARTO</option>
           </select>
         </label>
       </div>
