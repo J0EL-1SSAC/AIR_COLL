@@ -4,7 +4,7 @@ node_modules/
 dist/
 data/*.db
 data/*.db-*
-data/runways.csv
+data/*.csv
 reports/coverage/
 reports/alert_evaluation/
 reports/runway_stats/
