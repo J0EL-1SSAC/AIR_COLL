@@ -65,7 +65,10 @@ def analyze_coverage(*, db_path: Path, airport_latitude: float, airport_longitud
     distance_bands = [(float(low), float(high), name) for low, high, name in settings["distance_rings_nm"]]
     runway_ends: list[RunwayEndGeometry] = []
     for runway in runway_list:
-        runway_ends.extend([runway.end_a.geometry_end(), runway.end_b.geometry_end()])
+        runway_ends.extend([RunwayEndGeometry(end.identifier,
+                            end.landing_threshold_x_m if end.landing_threshold_x_m is not None else end.x_m,
+                            end.landing_threshold_y_m if end.landing_threshold_y_m is not None else end.y_m,
+                            end.true_heading_deg) for end in (runway.end_a, runway.end_b)])
     altitude_counts = Counter()
     altitude_aircraft = defaultdict(set)
     distance_counts = Counter()
@@ -271,6 +274,7 @@ def analyze_coverage(*, db_path: Path, airport_latitude: float, airport_longitud
               "on_ground_reports_per_hour": ground_reports / max(duration_hours, 1e-9),
               "runway_buffer_reports_per_hour": (runway_reports / max(duration_hours, 1e-9)
                                                   if runway_list else None),
+              "runway_buffer_low_altitude_ft": float(settings.get("runway_buffer_low_altitude_ft", 1000)),
               "runway_buffer_low_altitude_reports_per_hour": (runway_buffer_low_reports / max(duration_hours, 1e-9) if runway_list else None),
               "runway_buffer_on_ground_reports_per_hour": (runway_buffer_ground_reports / max(duration_hours, 1e-9) if runway_list else None)}
     report["recommendations"] = _recommendations(report, settings)
@@ -348,7 +352,7 @@ def render_markdown(report: dict) -> str:
               f"- On-ground reports: {report['on_ground_reports_per_hour']:.2f} per recording hour.",
               f"- Runway-buffer reports: {runway_rate_text}.", ""]
     if report["runways_available"]:
-        lines.extend([f"- Runway-buffer reports below configured {settings.get('runway_buffer_low_altitude_ft', 1000)} ft: {report['runway_buffer_low_altitude_reports_per_hour']:.2f} per hour.",
+        lines.extend([f"- Runway-buffer reports below configured {report.get('runway_buffer_low_altitude_ft', 1000)} ft: {report['runway_buffer_low_altitude_reports_per_hour']:.2f} per hour.",
                       f"- Runway-buffer on-ground reports: {report['runway_buffer_on_ground_reports_per_hour']:.2f} per hour."])
     else:
         lines.append("- Runway-buffer low-altitude and on-ground report rates unavailable until runway geometry is loaded.")
