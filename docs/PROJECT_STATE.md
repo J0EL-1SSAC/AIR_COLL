@@ -33,6 +33,7 @@ AIR_COL/
 │   ├── replay.py
 │   ├── risk.py
 │   ├── runways.py
+│   ├── weather.py
 │   ├── state_manager.py
 │   └── storage.py
 ├── frontend/
@@ -46,7 +47,7 @@ AIR_COL/
 │       ├── main.jsx
 │       └── style.css
 ├── scripts/{coverage_report,evaluate_alerts,runway_stats,verify_frequencies,verify_runways}.py
-├── tests/{test_airport_reference,test_alerts,test_config,test_cpa,test_coverage_analysis,test_enu_frame,test_event_store,test_evaluation,test_frequencies,test_geometry,test_opensky_limits,test_pairs,test_prediction,test_replay,test_risk,test_runways,test_state_manager,test_storage}.py
+├── tests/{test_airport_reference,test_alerts,test_config,test_cpa,test_coverage_analysis,test_enu_frame,test_event_store,test_evaluation,test_frequencies,test_geometry,test_opensky_limits,test_pairs,test_prediction,test_replay,test_risk,test_runways,test_state_manager,test_storage,test_weather}.py
 ├── data/ (local OurAirports CSVs and SQLite files; ignored by Git)
 └── docs/PROJECT_STATE.md
 ```
@@ -101,6 +102,7 @@ The default collector poll interval is 30 seconds. Confirmation requires two qua
 - `GET /api/coverage`: recent recorded live coverage.
 - `GET /api/runways`: runway metadata plus core, buffer, extended centerline and approach corridor GeoJSON in standard `[longitude, latitude]` coordinate order. Returns HTTP 503 with manual file instructions if runway data is missing or contains no matching airport rows.
 - `GET /api/frequencies`: selected local frequency rows plus clearly labeled estimated DEP/CLR facility fallback and AIP verification notices.
+- `GET /api/weather`: latest cached live AviationWeather.gov METAR and TAF for the configured ICAO airport. Each product has independent `status`, provider report (or `null`), error, fetched-at UTC and age; METAR includes observation time and TAF includes issue/validity times. Missing or failed products are explicitly unavailable/degraded; there is no weather fallback.
 - `GET /api/reference/airports/{code}`: offline ICAO/IATA/OurAirports-ident lookup, backed by lazily built indexes; only one matching row is returned.
 - `GET /api/coverage/runway-summary`: headline numbers from `coverage_report.output_dir/coverage_summary.json`, HTTP 404 until the report script has generated one.
 - Replay: `GET /api/replay/status`, `POST /api/replay/start` with optional `{start_time,end_time,speed}`, and `POST /api/replay/stop`.
@@ -182,6 +184,14 @@ The earlier Phase 9 recording values are historical; see the data verification s
 Run `scripts/runway_stats.py --db data/airwatch.db --output-dir reports/runway_stats` to replay the selected recorded range through the state and approach trackers. The script writes JSON, a per-hour CSV, and Markdown. Install/run commands remain as above; API and UI launch as documented. Tests now include approach decision math/tracking, approach SQLite mode separation, and occupancy unknown/single-sample/ghost behavior.
 
 The Phase 9 browser redesign uses a bright theme, a vertical side tab rail, a scrolling panel, Overview/Aircraft/Approaches/Alerts/Replay views, and light CARTO Voyager default with OSM/Dark alternatives. Some requested replay conveniences remain limited: replay can start from a selected timestamp, but there is no true pause/step/scrub transport yet, and cycle table pairs/opened-alert counts are explicitly unavailable. Validate sizing and map tile availability in the browser.
+
+## Live weather and frequency display
+
+`backend/airwatch/weather.py` polls AviationWeather.gov's Data API for METAR and TAF using the configured airport ICAO. METAR refreshes every `weather.refresh_interval_s` (60 s default), TAF every `weather.taf_refresh_interval_s` (600 s default), and HTTP timeout is configured. Polling is backend-side because the provider API is not browser-CORS enabled. The service keeps the last fetched provider response on refresh failure but marks the product `DEGRADED`; report age beyond `weather.max_metar_age_s` is marked `STALE`. A provider no-report response or an empty valid response is `NOT_AVAILABLE`. No station data or weather value is inferred.
+
+The Overview tab polls `/api/weather` and presents raw METAR/TAF with provider time and retrieval age, plus available decoded METAR fields. It polls the UI cache at the configured METAR interval. The radio frequencies shown next to weather come from the user's local `data/airport-frequencies.csv` via `GET /api/frequencies`; they are reference data, not a live radio receiver, and carry the official-AIP verification reminder.
+
+Configuration is in `config.yaml` under `weather`: provider name, METAR/TAF URLs, refresh intervals, request timeout, maximum METAR age, and User-Agent. No new package was added. Check the AviationWeather.gov API usage terms and freshness notes before sustained use. Provider access may be blocked by local network or service conditions; the UI reports unavailable/degraded rather than estimating conditions.
 
 ## Data setup and verification before Phase 10
 
