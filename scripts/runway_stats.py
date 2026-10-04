@@ -78,7 +78,7 @@ async def run(args):
         "reason":"Measured runway-buffer coverage meets configured criteria." if occupancy_assessable else
         "Runway occupancy not assessable with current data: runway-buffer coverage metrics or geometry are insufficient."}
     clock=ReplayClock(); end_counts=Counter(); hourly=Counter(); sample_counts=defaultdict(int); track_summaries={}; too_few=set(); occupancy=Counter(); low_samples=0
-    counted_tracks=set()
+    counted_tracks=set(); corridor_segments={}; insufficient_corridor_segments=set()
     first=last=None
     for _ in range(source.total_cycles):
         timestamp=source.next_fetch_time
@@ -87,21 +87,40 @@ async def run(args):
         states=await source.fetch_states(center,float(airport["radius_nm"]))
         manager.update(states,timestamp)
         snapshot=manager.snapshot(timestamp,include_unpositioned=True)
+        corridor_present=set()
         for state in snapshot:
             for runway in runways:
                 for runway_end in (runway.end_a,runway.end_b):
                     evidence=evaluate_approach(state,runway_end,config["approach"],timestamp)
-                    if evidence.get("checks",{}).get("inside_corridor") and evidence.get("samples_in_corridor",0)<int(config["approach"]["min_closing_samples"]):
-                        too_few.add((state["icao24"],runway_end.identifier))
+                    if (evidence.get("checks",{}).get("inside_corridor")
+                            and evidence.get("checks",{}).get("fresh_data")):
+                        corridor_present.add((state["icao24"],runway_end.identifier))
+        segment_gap=float(config["coverage_report"]["max_track_gap_s"])
+        for key,segment in list(corridor_segments.items()):
+            if timestamp-segment["last"] > segment_gap:
+                if segment["samples"] < int(config["approach"]["min_closing_samples"]):
+                    insufficient_corridor_segments.add((key,segment["first"]))
+                del corridor_segments[key]
+        for key in corridor_present:
+            state=next((item for item in snapshot if item["icao24"]==key[0]),None)
+            sample_ts=timestamp if state is None or state.get("position_timestamp") is None else float(state["position_timestamp"])
+            segment=corridor_segments.get(key)
+            if segment is None:
+                corridor_segments[key]={"first":timestamp,"last":timestamp,"samples":1,"last_sample_ts":sample_ts}
+            elif segment["last_sample_ts"] != sample_ts:
+                segment["last"]=timestamp; segment["samples"]+=1; segment["last_sample_ts"]=sample_ts
         approaches=tracker.update(snapshot,runways,timestamp)
         for item in approaches:
             key=item["runway_end"]
             approach_key=(item["icao24"],key,item.get("first_seen_ts"))
             sample_counts[approach_key]=max(sample_counts[approach_key],int(item.get("samples",0)))
+            previous=track_summaries.get(approach_key,{})
+            altitude_m=item.get("altitude_m")
+            minimum_altitude=min([v for v in (previous.get("minimum_altitude_m"),altitude_m) if v is not None],default=None)
             track_summaries[approach_key]={"samples":int(item.get("samples",0)),
                 "last_distance_to_threshold_m":item.get("distance_to_threshold_m"),
                 "last_seen_ts":item.get("last_seen_ts"),"outcome":item.get("outcome"),
-                "minimum_altitude_m":item.get("altitude_m")}
+                "minimum_altitude_m":minimum_altitude}
             if int(item.get("samples",0))<int(config["approach"]["min_closing_samples"]): too_few.add(approach_key)
             if approach_key not in counted_tracks:
                 counted_tracks.add(approach_key)
@@ -111,6 +130,10 @@ async def run(args):
             (state.get("geo_altitude_m") if state.get("geo_altitude_m") is not None else state.get("baro_altitude_m")) - float(config["coverage_report"]["ground_elevation_m"]) <= float(config["coverage_report"]["approach_altitude_ceiling_m"]))
         occupancy_data=occupancy_tracker.update(snapshot,runways,timestamp,occupancy_assessable,gate)
         for runway_state in occupancy_data["runways"].values(): occupancy[runway_state["status"]]+=1
+    for key,segment in corridor_segments.items():
+        if segment["samples"] < int(config["approach"]["min_closing_samples"]):
+            insufficient_corridor_segments.add((key,segment["first"]))
+    too_few=set(insufficient_corridor_segments)
     out={"cycles":source.total_cycles,"recording_start_utc":None if first is None else datetime.fromtimestamp(first,timezone.utc).isoformat(),
          "recording_end_utc":None if last is None else datetime.fromtimestamp(last,timezone.utc).isoformat(),
          "runway_data_error":runway_error,"approach_detections_by_runway_end":dict(Counter(runway for _aircraft,runway,_first in sample_counts)),
@@ -121,7 +144,10 @@ async def run(args):
          "occupancy_status_observations":dict(occupancy),"low_altitude_received_reports":low_samples,
          "occupancy_assessable":occupancy_assessable,"occupancy_coverage_gate":gate,
          "occupancy_note":gate["reason"]}
-    print(json.dumps(out,indent=2))
+    print(json.dumps({key:out[key] for key in ("cycles","recording_start_utc","recording_end_utc",
+        "runway_data_error","approach_detections_by_runway_end","approach_counts_by_hour",
+        "approach_track_count","too_few_samples","occupancy_status_observations",
+        "occupancy_assessable","occupancy_coverage_gate","occupancy_note")},indent=2))
     output=Path(args.output_dir); output=output if output.is_absolute() else ROOT/output
     output.mkdir(parents=True,exist_ok=True)
     (output/"runway_stats.json").write_text(json.dumps(out,indent=2),encoding="utf-8")
