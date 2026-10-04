@@ -1,4 +1,4 @@
-# AIR_COL project state — Phase 8
+# AIR_COL project state — Phase 9
 
 AIR_COL is a research and education prototype for live ADS-B around one configured airport. It is **not ATC, TCAS/ACAS, or a certified safety system**. It uses live OpenSky observations and app-recorded observations for replay and offline evaluation. It does not generate fallback or demo aircraft. Potential Aircraft Conflict entries are research estimates, not official separation determinations.
 
@@ -13,6 +13,8 @@ AIR_COL/
 ├── backend/airwatch/
 │   ├── api/{__init__.py,app.py}
 │   ├── alerts.py
+│   ├── approach.py
+│   ├── approach_store.py
 │   ├── cli.py
 │   ├── clock.py
 │   ├── collector.py
@@ -23,6 +25,7 @@ AIR_COL/
 │   ├── geometry.py
 │   ├── models.py
 │   ├── opensky.py
+│   ├── occupancy.py
 │   ├── pairs.py
 │   ├── prediction.py
 │   ├── replay.py
@@ -40,7 +43,7 @@ AIR_COL/
 │       ├── config.js
 │       ├── main.jsx
 │       └── style.css
-├── scripts/{coverage_report,evaluate_alerts,verify_runways}.py
+├── scripts/{coverage_report,evaluate_alerts,runway_stats,verify_runways}.py
 ├── tests/{test_alerts,test_config,test_cpa,test_coverage_analysis,test_enu_frame,test_event_store,test_evaluation,test_geometry,test_opensky_limits,test_pairs,test_prediction,test_replay,test_risk,test_runways,test_state_manager,test_storage}.py
 └── docs/PROJECT_STATE.md
 ```
@@ -160,3 +163,17 @@ Tests include risk boundaries/adjustments, lifecycle/hysteresis/cooldown/data lo
 ## Known limitations
 
 The risk profiles are configurable research examples, not validated separation criteria. The CPA itself assumes constant horizontal velocity and vertical rate and inherits public ADS-B latency, missing reports, and position error. Candidate confirmation adds an additional poll interval. Runway records and magnetic variation must be checked against the current official AIP/aerodrome charts; the validation checks are warnings only. Public ADS-B generally cannot establish reliable ground/runway occupancy because low-altitude and surface coverage can be poor. Coverage report movement-direction classes are heuristics, not flight phase labels from an authoritative source. Alerts and runway geometry are not operational data and must not be used for ATC, separation, collision avoidance, or runway decisions.
+
+## Phase 9: approach tracking and experimental occupancy
+
+`backend/airwatch/approach.py` consumes the manager's age-compensated `analysis_x_m` / `analysis_y_m` fields and timestamped ENU history. Those existing names were retained. True track and runway heading are compared using the Phase 8 wrap-safe `heading_difference`; runway true headings are calculated from threshold coordinates. The tracker is called from the collector's existing Clock-driven pipeline callback for both LIVE and REPLAY. It adds candidate/confirmation/hysteresis outcomes, glide-angle and heading evidence, confidence, and min–max ETA windows. `approach_tracks` rows are tagged LIVE/REPLAY; replay observations still never enter `raw_states`.
+
+`GET /api/approaches` exposes current classifications and persisted approach tracks. `GET /api/runway-status` exposes per-end approach counts and runway-use estimate plus experimental runway occupancy statuses. Occupancy has a hard coverage gate and ghost retention; it never reports “clear.” `GET /api/replay/sessions` and `GET /api/replay/cycles` list source-recorded sessions/cycle counts read-only. Cycle-level pair and alert values are unavailable where they were not recorded as per-cycle derived data; the UI displays these as unavailable.
+
+New config sections: `approach` (geometry/quality limits, confirmation, hysteresis, speed uncertainty, runway-in-use evidence), `occupancy` (persistence, ghost TTL, evidence and coverage gate), and `replay_ui.session_gap_s`. Occupancy coverage uses **runway-buffer-specific** low-altitude and on-ground rates. The Phase 8 report has only airport-wide low-altitude rates; those are intentionally not accepted as a runway-buffer gate.
+
+The updated coverage run spans 29.47 elapsed hours but only 4.27 hours of observed poll-to-poll coverage (the report now excludes gaps over the configured 90 seconds from its recording-hours gate). It includes 582 recorded poll cycles / 3,042 reports, with 41 gaps longer than 90 seconds and zero on-ground reports. `data/runways.csv` is absent, so runway-buffer rates, approach corridors, and runway geometry are unavailable; the report says approach monitoring and occupancy are insufficient data. `/api/runway-status` therefore returns `occupancy_assessable: false` and `UNKNOWN` when runway rows are available, with the explicit message “Runway occupancy not assessable with current data.” These figures are received data only, not proof of no activity.
+
+Run `scripts/runway_stats.py --db data/airwatch.db --output-dir reports/runway_stats` to replay the selected recorded range through the state and approach trackers. The script writes JSON, a per-hour CSV, and Markdown. Install/run commands remain as above; API and UI launch as documented. Tests now include approach decision math/tracking, approach SQLite mode separation, and occupancy unknown/single-sample/ghost behavior.
+
+The Phase 9 browser redesign uses a bright theme, a vertical side tab rail, a scrolling panel, Overview/Aircraft/Approaches/Alerts/Replay views, and light CARTO Voyager default with OSM/Dark alternatives. Some requested replay conveniences remain limited: replay can start from a selected timestamp, but there is no true pause/step/scrub transport yet, and cycle table pairs/opened-alert counts are explicitly unavailable. Validate sizing and map tile availability in the browser.
