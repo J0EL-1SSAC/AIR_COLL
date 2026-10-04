@@ -183,6 +183,18 @@ airport_reference:
   data_file: data/airports.csv
   database_file: data/airport_reference.db
 
+# Live aviation weather from AviationWeather.gov Data API. METAR and TAF are
+# separate products with different update rates; missing/failed products stay unavailable.
+weather:
+  provider: AviationWeather.gov Data API
+  metar_url: https://aviationweather.gov/api/data/metar
+  taf_url: https://aviationweather.gov/api/data/taf
+  refresh_interval_s: 60
+  taf_refresh_interval_s: 600
+  request_timeout_s: 15
+  max_metar_age_s: 3600
+  user_agent: AIR_COL research prototype (local use)
+
 # Approach and occupancy estimates are research observations, not operational classifications.
 approach:
   max_heading_diff_deg: 15
