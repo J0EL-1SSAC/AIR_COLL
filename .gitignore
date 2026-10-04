@@ -7,5 +7,6 @@ data/*.db-*
 data/runways.csv
 reports/coverage/
 reports/alert_evaluation/
+reports/runway_stats/
 __pycache__/
 .pytest_cache/
